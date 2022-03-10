@@ -1,0 +1,181 @@
+---
+title: "Rank kinases with the build kinase prediction model"
+author: "Valdemaras Petrosius"
+date: "12.08.2021"
+output: 
+    html_document:
+        toc: true
+        theme: united
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  comment = "##", include = FALSE
+)
+```
+
+```{r loading needed data for model}
+library(tidyverse)
+library(pbapply)
+library(corrplot)
+pssm <- readRDS("data/kinase_pssm.rds")
+kinaseModels <- readRDS("data/kinaseModels.rds")
+```
+
+```{r loading data to apply models on}
+data <- readRDS("data/tt_omni_clust.rds")
+data$ID <- paste("Pid", 1:dim(data)[1], sep = "")
+#Setting new colnames for split animo acids
+myCols <- paste("A", 0:21, sep = "")
+#Spliting the phosphorylation site motif into single amino acids per column 
+data_aa <- data %>% separate(motif, sep = "", into = myCols) %>% select(A1:A21)
+#Adding rownames as IDs for the data
+rn <- paste(data$MasterMod,data$GeneName.x,data$ID, sep = ":")
+rn <- paste(rn, data$enzyme_genesymbol, sep = "--")
+data_aa$ID <- rn
+#removing the motifs with NAs
+data_aa <- data_aa %>% na.omit()
+#Spliting the dataframe into list 
+data_aa.split <- split(data_aa, f = data_aa$ID)
+#Removing the ID column
+data_aa.split <- lapply(data_aa.split,function(x) as.character(x[-22]))
+```
+
+```{r need functions}
+
+#FOR SCORING MOTIFS
+
+#Generates indexing matrix based on one motif. Used with the wrapper function below.
+generateMatrix <- function(x,m,motifLength = 21){
+    #clone input
+    m2 <- m
+    #loop the matching.Finds the row that corespons to the amino acid at a specific position  in the motif in the indexing matrix 
+    #Changes it from FALSE to TRUE in that specific position (i)
+    for (i in 1:motifLength){
+    m2[rownames(m2) == x[i],i] <- TRUE
+    }
+    #Returns the data
+    m2
+}
+
+#Wrapper function to generate indexing matrix for a list of motifs
+indexingMatrix <- function(df, cols = 21, rows = 20){
+
+    temp <- df
+    #Creating empty matrix
+    m <-matrix(FALSE, ncol = cols, nrow = rows)
+    rownames(m) <- c("A", "R", "N", "D", "C", "Q", "E", "G", "H", "I", "L", "K", "M", "F", "P", "S", "T", "W", "Y", "V")
+    colnames(m) <- paste("A", 1:cols, sep = "")
+
+    #Generating the indexing matrices
+    temp <- lapply(temp, generateMatrix, m = m)
+    #Return data
+    temp
+}
+
+
+#Function for calculating the score for a single motif
+punchCard <- function(motifs, pssm){
+
+    sum(pssm[motifs])
+}
+
+
+#Apply function for one motif to all the pssms
+calcScore <- function(mat, pssm){
+        unlist(lapply(mat, punchCard, pssm = pssm))
+} 
+
+#FOR TRANSFORMING THE SCORES FROM PSSM TO PROBABILITY WITH PREBUILD MODELS 
+
+#Calculate probabilities
+predictProb <- function(data, models){
+    #Predicts probability that the site is a specific kinase site based on kinase specific logistic regression models 
+    #generate as binary problems in a one vs all manner.
+    #data - a dataframe containing the kinase specific PSSM scores in columns and sites in rows. First columns contains IDs for the sites
+    #models - a nested list containing the pretrained models
+
+    ## cloning inpy  
+    kinases <- names(models)
+
+    #loop the calculation because I do not know how to do this with an apply function. I should really figure it out...
+    kinase_avg <- list()
+    kinase_std <- list()
+    j = 2
+    #The names of the kinases are in the same order as the columns
+    for (i in kinases){
+       #Calculating the probability from all the models 
+       temp_prob <- predict(models[[i]], type = "response", newdata = data[j])
+       #Converting to dataframe
+       temp_prob <- as.data.frame(do.call(cbind, temp_prob)) 
+       #Adding the mean probability to list
+       kinase_avg[[i]] <- apply(temp_prob,1,mean)
+       #Adding the standart deviation to the list
+       kinase_std[[i]] <- apply(temp_prob,1,sd)
+       j = j + 1 # omits the first row that contains IDs and moves the newdata column for the next iteration.
+       print(paste("Current kinase:", i, sep = " "))
+    }
+
+    #convert nested list to scores 
+    kinase_avg <- as.data.frame(do.call(cbind, kinase_avg)) 
+    kinase_std <- as.data.frame(do.call(cbind, kinase_std))
+    #rename the standart deviation columns
+    colnames(kinase_std) <- paste(colnames(kinase_avg), "std", sep = "_")
+
+    #Bind dataframes and return
+    cbind(kinase_avg, kinase_std)
+}
+
+```
+
+```{r applying the model}
+#Apply the function to score all the motifs
+
+#Generate motif index matrices 
+motif_index <- indexingMatrix(data_aa.split)
+#Caculate PSSM scores 
+motif_scores <- pblapply(pssm, calcScore, mat = motif_index)
+names(motif_scores)
+#converting to dataframe
+data_scores <-as.data.frame((do.call(cbind, motif_scores)))
+#Extract the annotated kinase to a new column 
+data_scores$Kinase <- str_extract(rownames(data_scores), "--.*")
+data_scores$Kinase <- gsub("--", "", data_scores$Kinase)
+#Adding ID column again 
+data_scores <- cbind(rownames(data_scores), data_scores)
+#Transforming scores to probabilities
+data_prob <- predictProb(data_scores[-63], models = kinaseModels) # there is some problem here with the variables.Have to run the pssmScoringTest script for the function to work
+#Add kinase back 
+k1 <- str_extract(rownames(data_prob), "--.*")
+k2 <- gsub("-", "", k1)
+data_prob$Kinase <- k2
+```
+
+
+```{r rank the kinases based on probability}
+#Convert the scores to names vectors in nested lists
+data_prob2 <- data_prob %>% rownames_to_column("ID")
+#Spliting into nested list
+prob_list <- split(data_prob2[-c(1,63:124)], f = data_prob2$ID)
+prob_list_sorted <- pblapply(prob_list,function(x)sort(x,decreasing = TRUE))
+#Return the sorted names of kinases that are now sorted from largest to smallest probability 
+prob_list_names <- pblapply(prob_list_sorted, function(x) names(x))
+#Convert back to dataframe 
+kinase_names <- as.data.frame(do.call(rbind, prob_list_names))
+colnames(kinase_names) <- paste("K", 1:61, sep = "")
+#Top kinase with scores
+topKinase <- cbind(data_prob2[c(1:62)], kinase_names)
+
+```
+
+```{r add to original data}
+data_pred <- data %>% mutate(ID = rn) %>%  left_join(topKinase, by = "ID")
+saveRDS(data_pred, "data/tt_kinaseRank.rds")
+```
+
+```{r}
+t1 <- table(data_pred$K1)
+t2 <- table(data_pred$K2)
+t3 <- table(data_pred$K3)
+
+```

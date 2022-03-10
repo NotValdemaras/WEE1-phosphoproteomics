@@ -1,0 +1,225 @@
+---
+title: "Peptide filtering and statistical testing"
+author: "Valdemaras Petrosius"
+date: "12.06.2021"
+output: 
+    html_document:
+        toc: true
+        theme: united
+---
+```{r}
+#Setting for the notebook. Chucks are excluded unless indicated otherwise
+knitr::opts_chunk$set(knitr::opts_chunk$set(include = FALSE, warning = FALSE, echo = FALSE, fig.width = 14, fig.height = 8))
+```
+
+
+```{r packages and data}
+library(limma)
+library(dplyr)
+library(ggrepel)
+library(gridExtra)
+library(ggprism)
+source("functions.R")
+#Data
+protG <- readRDS("data/datProtG.rds")
+protP <- readRDS("data/datProtP.rds")
+pepG <- readRDS("data/datPepG.rds")
+pepP <- readRDS("data/phos.rds")
+infoG <- readRDS("data/infoG.rds")
+infoP <- readRDS("data/infoP.rds")
+```
+
+```{r filtering proteins}
+pepG_n <- pepG %>% filter(grepl("TMT", Modifications), !grepl("Phospho", Modifications)) # non phosphorylated peptides
+pepP_n <- pepP %>% filter(grepl("TMT", Modifications), !grepl("Phospho", Modifications))
+
+pepG_p <- pepG %>% filter(grepl("TMT", Modifications), grepl("Phospho", Modifications))
+pepP_p <- pepP %>% filter(grepl("TMT", Modifications), grepl("Phospho", Modifications))
+
+#merge the filtered peptides
+
+np <- rbind(pepG_n, pepP_n)
+pp <- rbind(pepG_p, pepP_p)
+```
+
+```{r print summary of detected peptides, include = TRUE}
+paste("Total peptides", sum(dim(pepG_n)[1], dim(pepP_n)[1],dim(pepG_p)[1], dim(pepP_p)[1]))
+paste("Total phosphopeptides", sum(dim(pepG_p)[1], dim(pepP_p)[1]))
+```
+
+
+```{r mergin peptides with different TMT labelling}
+#For now removing all missing values
+np2 <- na.omit(np)
+#na.omit also removes rows with empty genes names
+pp$GeneName[is.na(pp$GeneName)] <- "Later"
+pp2 <- na.omit(pp)
+```
+
+```{r statistical testing}
+datnp <- log2(np2[4:18])
+datpp <- log2(pp2[4:18])
+
+#Setting up design matrix for experiment
+myLabels <- rep(c("min0", "min20", "min40", "min60", "min90"),3)
+group <- as.factor(rep(c("min0", "min20", "min40", "min60", "min90"),3))
+design <- model.matrix(~ 0 + group);colnames(design) <- c("min0", "min20", "min40", "min60", "min90")
+design
+
+#0min vs 20min
+contrast <- makeContrasts(min20-min0, levels = design)
+fit.20 <- lmFit(datpp, design)
+fit2.20 <- contrasts.fit(fit.20, contrast)
+fit2.20 <- eBayes(fit2.20, trend = TRUE)
+tt20 <- topTable(fit2.20, coef = 1, sort.by = "none", number = Inf)
+
+#0min vs 40min
+contrast <- makeContrasts(min40-min0, levels = design)
+fit.40 <- lmFit(datpp, design)
+fit2.40 <- contrasts.fit(fit.40, contrast)
+fit2.40 <- eBayes(fit2.40, trend = TRUE)
+tt40 <- topTable(fit2.40, coef = 1, sort.by = "none", number = Inf)
+
+#0min vs 60min
+contrast <- makeContrasts(min60-min0, levels = design)
+fit.60 <- lmFit(datpp, design)
+fit2.60 <- contrasts.fit(fit.60, contrast)
+fit2.60 <- eBayes(fit2.60, trend = TRUE)
+tt60 <- topTable(fit2.60, coef = 1, sort.by = "none", number = Inf)
+
+#0min vs 90min
+contrast <- makeContrasts(min90-min0, levels = design)
+fit.90 <- lmFit(datpp, design)
+fit2.90 <- contrasts.fit(fit.90, contrast)
+fit2.90 <- eBayes(fit2.90, trend = TRUE)
+tt90 <- topTable(fit2.90, coef = 1, sort.by = "none", number = Inf)
+
+tt <- cbind(tt20[c(1,5)], tt40[c(1,5)], tt60[c(1,5)], tt90[c(1,5)], pp2[c(1,4:18,20:22)])
+colnames(tt) <- c("logFC_20min", "FDR_20min", "logFC_40min", "FDR_40min", "logFC_60min", "FDR_60min", "logFC_90min", "FDR_90min", colnames(pp2[c(1,4:18,20:22)]))
+```
+
+```{r plot number of significant sites, include = TRUE}
+NrOfSites <- c(sum(tt$FDR_20min < 0.05), sum(tt$FDR_40min < 0.05), sum(tt$FDR_60min < 0.05), sum(tt$FDR_90min < 0.05))
+Condition = c("min20", "min40", "min60", "min90")
+siteSummary <- data.frame(NrOfSites, Condition) %>% 
+                mutate(Condition = factor(gsub("min", "", Condition), levels = rev(c("20", "40", "60", "90"))))
+
+ggplot(siteSummary, aes(x = Condition, y = NrOfSites, label = NrOfSites, fill = Condition)) + 
+        geom_bar(stat="identity") + 
+        geom_label(fill= "white", hjust = 0.8) +
+        ggprism::theme_prism() +
+        ggtitle("FDR < 
+        0.05") +
+        scale_y_continuous(guide = "prism_offset") +
+        xlab("Time, min") + ylab("Significant phosphopeptides") +
+        theme(legend.position = "none") +
+        ggpubr::labs_pubr() +
+        scale_fill_manual(values = hcl.colors(n=20, "RdBu")[c(4,3,2,1)]) +
+        coord_flip()
+
+```
+
+# Volcano plots
+
+## WEE1i 20min
+```{r volcano plots 20min, include = TRUE}
+ggplot(tt, aes(x = logFC_20min, y = -log10(FDR_20min), label = GeneMod)) + geom_point(alpha = 0.5) + theme_bw() + 
+            xlab('logFC') + ylab('-log10(FDR)') + 
+            geom_hline(yintercept = -log10(0.05), color = 'grey', linetype="dashed", size = 1) + 
+            geom_vline(xintercept = 0.2, color = 'red', linetype = "dashed", size = 1) + 
+            geom_vline(xintercept = -0.2, color = "blue", linetype = "dashed", size = 1) +
+            geom_text_repel(data = subset(tt, -log10(FDR_20min) > 3 & abs(logFC_20min) > 0.5)) +
+            geom_point(data = subset(tt, -log10(FDR_20min) > 2 & logFC_20min > 0.5), color = "red") +
+            geom_point(data = subset(tt, -log10(FDR_20min) > 2 & logFC_20min < -0.5), color = "blue")
+
+```
+
+## WEE1i 40min
+```{r volcano plots 40min, include = TRUE}
+ggplot(tt, aes(x = logFC_40min, y = -log10(FDR_40min), label = GeneMod)) + geom_point(alpha = 0.5) + theme_bw() + 
+            xlab('logFC') + ylab('-log10(FDR)') + 
+            geom_hline(yintercept = -log10(0.05), color = 'grey', linetype="dashed", size = 1) + 
+            geom_vline(xintercept = 0.2, color = 'red', linetype = "dashed", size = 1) + 
+            geom_vline(xintercept = -0.2, color = "blue", linetype = "dashed", size = 1) +
+            geom_text_repel(data = subset(tt, -log10(FDR_40min) > 3 & abs(logFC_40min) > 0.5)) +
+            geom_point(data = subset(tt, -log10(FDR_40min) > 2 & logFC_40min > 0.5), color = "red") +
+            geom_point(data = subset(tt, -log10(FDR_40min) > 2 & logFC_40min < -0.5), color = "blue")
+
+```
+
+## WEE1i 60min
+```{r volcano plots 60min, include = TRUE}
+ggplot(tt, aes(x = logFC_60min, y = -log10(FDR_60min), label = GeneMod)) + geom_point(alpha = 0.5) + theme_bw() + 
+            xlab('logFC') + ylab('-log10(FDR)') + 
+            geom_hline(yintercept = -log10(0.05), color = 'grey', linetype="dashed", size = 1) + 
+            geom_vline(xintercept = 0.2, color = 'red', linetype = "dashed", size = 1) + 
+            geom_vline(xintercept = -0.2, color = "blue", linetype = "dashed", size = 1) +
+            geom_text_repel(data = subset(tt, -log10(FDR_60min) > 3 & abs(logFC_60min) > 0.5)) +
+            geom_point(data = subset(tt, -log10(FDR_60min) > 2 & 6 > 0.5), color = "red") +
+            geom_point(data = subset(tt, -log10(FDR_60min) > 2 & logFC_60min < -0.5), color = "blue")
+
+```
+
+## WEE1i 90min
+```{r volcano plots 90min, include = TRUE}
+ggplot(tt, aes(x = logFC_90min, y = -log10(FDR_90min), label = GeneMod)) + geom_point(alpha = 0.5) + theme_bw() + 
+            xlab('logFC') + ylab('-log10(FDR)') + 
+            geom_hline(yintercept = -log10(0.05), color = 'grey', linetype="dashed", size = 1) + 
+            geom_vline(xintercept = 0.2, color = 'red', linetype = "dashed", size = 1) + 
+            geom_vline(xintercept = -0.2, color = "blue", linetype = "dashed", size = 1) +
+            geom_text_repel(data = subset(tt, -log10(FDR_90min) > 3 & abs(logFC_90min) > 0.5)) +
+            geom_point(data = subset(tt, -log10(FDR_90min) > 2 & logFC_90min > 0.5), color = "red") +
+            geom_point(data = subset(tt, -log10(FDR_90min) > 2 & logFC_90min < -0.5), color = "blue")
+
+```
+
+```{r}
+saveData = FALSE
+
+if (saveData){
+        saveRDS(tt, "data/tt.rds")
+}
+```
+
+
+
+# Attaching annotation from omnipath and netPhorest predictions 
+
+```{r importing annotation}
+require(OmnipathR)
+ptms <- import_omnipath_enzsub(resources=c("PhosphoSite", "SIGNOR"))
+interactions <-  import_omnipath_interactions()
+ptms <- get_signed_ptms(ptms, interactions)  %>% dplyr::filter(grepl("phosphorylation", modification))
+sites <- ptms %>% dplyr::select(enzyme, 
+                                substrate, 
+                                enzyme_genesymbol, 
+                                substrate_genesymbol,
+                                residue_offset,
+                                residue_type,
+                                curation_effort) %>% 
+                         mutate(MasterMod = paste(residue_type, residue_offset, sep = ""))
+
+dim(sites)
+```
+
+
+
+```{r attaching uniprot data}
+uniprotDf <- readRDS("data/human_uniprotDf.rds")
+tt_uni <- left_join(tt, uniprotDf[c(2,1,5)], by = c("Accession"))
+#saveRDS(tt_uni, "data/tt_uni.rds")
+```
+
+```{r attaching omnipath and adding motif}
+tt_omni <- tt_uni %>% separate_rows(MasterMod, sep = ";") %>% as.data.frame()
+tt_omni <- left_join(tt_omni, sites, by = c("GeneName" = "substrate_genesymbol", "MasterMod")) %>%
+            mutate(location = as.integer(str_extract(MasterMod, "\\d+"))) %>% 
+            select(-residue_offset, -residue_type, -enzyme,-substrate)
+tt_omni$motif <- mapply(extractAA, tt_omni$location, tt_omni$AAseq, l = 10)
+#saveRDS(tt_omni, "data/tt_omni.rds")
+```
+
+```{r attaching prediction}
+tt_pred <- left_join(tt_omni, pred_group, by = c("UniprotGene", "location"))
+#saveRDS(tt_pred, "data/tt_pred.rds")
+```

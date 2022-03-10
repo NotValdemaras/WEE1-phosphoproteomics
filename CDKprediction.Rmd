@@ -1,0 +1,280 @@
+#This small script is used to extract empirical cdk sites 
+
+```{r}
+library(tidyverse)
+library(ggseqlogo)
+library(ggprism)
+library(ggpubr)
+library(VennDiagram)
+source("functions.R")
+```
+
+```{r}
+tt_rank <- readRDS("data/tt_kinaseRank_updated_clust.rds") %>% mutate(AccMod = paste(Accession, MasterMod, sep = ":"))
+old_cluster <- readRDS("clusters_old.rds") %>% dplyr::rename(AssignedClusterOld = AssignedCluster)
+tt_rank <- readRDS("data/tt_kinaseRank_updated_clust.rds") %>% mutate(AccMod = paste(Accession, MasterMod, sep = ":")) %>%
+                left_join(old_cluster %>% dplyr::select(-MasterMod), by = c("GeneMod")) %>% 
+                dplyr::select(-AssignedCluster) %>% dplyr::rename(AssignedCluster = AssignedClusterOld) # ADJUSTED TO CLUSTER TO THE OLD CLUSTERING TO SEE CHANGES
+
+theoretical_cdk <- tt_rank %>% filter(CDK1 > .563 | CDK2 > .374) %>% 
+                filter(!duplicated(AccMod)) 
+
+theoretical_cdk2 <- tt_rank %>% dplyr::filter(grepl("CDK1|CDK2", K1), !duplicated(AccMod)) %>% saveRDS("data/t2_cdk.rds")
+            
+
+empirical_cdk <- tt_rank %>% 
+                dplyr::filter(CDK1 > .563 | CDK2 > .374, FDR_90min < 0.05, AssignedCluster %in% c(7,8)) %>% 
+                filter(!duplicated(AccMod))
+```
+
+```{r}
+#Quick check for known CDK substrates in clusters and total sites in clusters 
+
+total_sites <- tt_rank %>% filter(FDR_90min < 0.05 | FDR_20min < 0.05 | FDR_40min < 0.05 | FDR_60min < 0.05) %>% select(AccMod, AssignedCluster) %>% distinct() %>% count(AssignedCluster) %>% mutate(type = "Altered")
+total_sites2 <- tt_rank  %>% select(AccMod, AssignedCluster) %>% distinct() %>% count(AssignedCluster) %>% mutate(type = "Total")
+known_cdk_sites <- tt_rank %>% filter(grepl("CDK1|CDK2", enzyme_genesymbol)) %>% select(AccMod, AssignedCluster) %>% count(AssignedCluster) %>% mutate(type = "CDK")
+
+detectionProblem <- bind_rows(list(total_sites, total_sites2, known_cdk_sites)) %>% 
+                    mutate(type = factor(type, levels = c("Total", "Altered", "CDK")))
+
+ggplot(detectionProblem, aes(x = AssignedCluster, y = n, fill = type)) + 
+        geom_bar(stat = "identity", position = "dodge") + 
+        theme_prism() +
+        scale_y_continuous(guide ="prism_offset") +
+        ggsci::scale_fill_jama() +
+        xlab("Assigned Cluster") + 
+        ylab("Count")
+```
+
+```{r}
+#Check the overlaps
+anno <- tt_rank %>% filter(enzyme_genesymbol %in% c("CDK1", "CDK2")) %>% select(GeneMod) %>% unique()
+#Annotated sites in clusters
+anno_c <- tt_rank %>% filter(enzyme_genesymbol %in% c("CDK1", "CDK2"), AssignedCluster %in% c(3,8)) %>% select(GeneMod) %>% unique()
+b <- anno %>% filter(GeneMod %in% theoretical_cdk$GeneMod) 
+c <- anno_c %>% filter(GeneMod %in% empirical_cdk$GeneMod) 
+
+tt_rank %>% filter(enzyme_genesymbol %in% c("CDK1", "CDK2")) %>% filter(!(GeneMod %in% b$GeneMod)) %>% count(AssignedCluster)
+tt_rank %>% filter(enzyme_genesymbol %in% c("CDK1", "CDK2")) %>% filter(GeneMod %in% b$GeneMod) %>% count(AssignedCluster)
+
+```
+
+```{r}
+#Checking site annotation in clusters 
+
+#Calculate sites for CDKs in clusters 
+df1 <- tt_rank %>% filter(enzyme_genesymbol %in% c("CDK1", "CDK2")) %>% group_by(AssignedCluster) %>% 
+                   select(AccMod, AssignedCluster,enzyme_genesymbol) %>% distinct() %>% count(AssignedCluster) %>%
+                   mutate(type = "Annotated")
+# Emprical 
+df2 <- tt_rank %>% filter(enzyme_genesymbol %in% c("CDK1", "CDK2"), GeneMod %in% empirical_cdk$GeneMod) %>%
+                   group_by(AssignedCluster) %>% 
+                   select(AccMod) %>% distinct() %>% count(AssignedCluster) %>%
+                   mutate(type = "Empirical")
+
+# Theoretical 
+df3 <- tt_rank %>% filter(enzyme_genesymbol %in% c("CDK1", "CDK2"), CDK1 > .563 | CDK2 > .374 | CDK5 > .452,) %>% 
+                    group_by(AssignedCluster) %>% 
+                   select(AccMod) %>% distinct() %>% count(AssignedCluster) %>%
+                   mutate(type = "Theoretical")
+
+#Combine all three 
+df <- bind_rows(list(df1,df2, df3)) %>% 
+            mutate(type = factor(type, levels = c("Annotated", "Theoretical", "Empirical")),
+                   Er = sqrt(n),
+                   AssingedCluster = as.character(AssignedCluster)) 
+
+ggplot(subset(df, AssignedCluster %in% c(7,8)), aes(x = as.numeric(AssignedCluster), y = n, fill = type)) + 
+    geom_bar(stat = "identity", position = position_dodge(1)) +
+    geom_linerange(aes(ymin = n - Er, ymax = n + Er),  position=position_dodge(1), size = 1.) +
+    scale_x_continuous(breaks = seq(1, 8, by = 1)) +
+    theme_prism() + 
+    scale_y_continuous(guide = "prism_offset") +
+    viridis::scale_fill_viridis(option = "F", discrete = T, end = 0.8) +
+    xlab("Cluster") + ylab("Count")
+```
+
+
+```{r}
+#Making a venn diagram for the clusters 
+library(VennDiagram)
+
+venn.diagram(
+  x = list(
+    tt_rank %>% filter(AssignedCluster == 7, enzyme_genesymbol %in% c("CDK1", "CDK2")) %>% pull(AccMod) %>% unique()  , 
+    tt_rank %>% filter(AssignedCluster == 7, AccMod %in% c(empirical_cdk$AccMod)) %>% pull(AccMod) %>% unique(), 
+    tt_rank %>% filter(AssignedCluster == 7, AccMod %in% theoretical_cdk$AccMod) %>% pull(AccMod) %>% unique()),
+  category.names = c("Annotated" , "Empirical" , "Theoretical"),
+  filename = 'venn.png',
+  output = TRUE ,
+          imagetype="png" ,
+          height = 480 , 
+          width = 480 , 
+          resolution = 300,
+          compression = "lzw",
+          lwd = 1,
+          col=c("#f98e09", '#bc3754', '#57106e'),
+          fill = c(alpha("#f98e09",1), alpha('#bc3754',1), alpha('#57106e',1)),
+          cex = 0.4,
+          fontfamily = "sans",
+          cat.cex = 0.6,
+          cat.default.pos = "outer",
+          cat.pos = c(-5, 5, 135),
+          cat.dist = c(0.055, 0.055, 0.015),
+          cat.fontfamily = "sans",
+          cat.col = c("#f98e09", '#bc3754', '#57106e'),
+          rotation = 1
+        )
+
+ 
+# Generate 3 sets of 200 words
+set1 <- tt_rank %>% filter(AssignedCluster %in% c(8), enzyme_genesymbol %in% c("CDK1", "CDK2")) %>% pull(AccMod) %>% unique()
+set2 <- tt_rank %>% filter(AssignedCluster %in% c(8), AccMod %in% empirical_cdk$AccMod) %>% pull(AccMod) %>% unique()
+set3 <- tt_rank %>% filter(AssignedCluster %in% c(8), AccMod %in% theoretical_cdk$AccMod) %>% pull(AccMod) %>% unique()
+
+#set1 <- tt_rank %>% filter(AssignedCluster == 8, enzyme_genesymbol %in% c("CDK1", "CDK2"), AccMod %in% empirical_cdk$AccMod) %>% pull(AccMod) %>% unique()
+# Prepare a palette of 3 colors with R colorbrewer:
+library(RColorBrewer)
+myCol <- c("#f98e09", '#bc3754', '#57106e')
+myCol <- c("#4B0055", "#007094", "#6CD05E") 
+# Chart
+venn.diagram(
+        x = list(set1, set2, set3),
+        category.names = c("Annotated" , "Empirical" , "Theoretical"),
+        filename = '#14_venn_diagramm.png',
+        output=TRUE,
+        
+        # Output features
+        imagetype="png" ,
+        height = 480 , 
+        width = 480 , 
+        resolution = 300,
+        compression = "lzw",
+        
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = myCol,
+        
+        # Numbers
+        cex = .6,
+        #fontface = "bold",
+        fontfamily = "sans",
+        
+        # Set names
+        cat.cex = 0.6,
+        cat.fontface = "bold",
+        cat.default.pos = "outer",
+        cat.pos = c(-5, 5, 180),
+        cat.dist = c(0.055, 0.015, 0.015),
+        cat.fontfamily = "sans",
+        rotation = 1
+)
+
+```
+
+
+```{r}
+require(OmnipathR)
+#get ptms for from specific databases, leave empty for all 
+ptms <- import_omnipath_enzsub(resources=c("PhosphoSite", "SIGNOR"))
+#Get interactions 
+interactions <-  import_omnipath_interactions(resources=c("PhosphoSite", "SIGNOR"))
+#Combine
+psp_signor <- get_signed_ptms(ptms, interactions) %>% 
+                filter(modification == "phosphorylation", grepl("CDK1|CDK2|CDK5", enzyme_genesymbol)) %>% mutate(MasterMod = paste(residue_type, residue_offset, sep = ""),
+                                                                     AccMod = paste(substrate, MasterMod, sep = ":")) %>% 
+                                                                     pull(AccMod) %>% 
+                                                                     unique()
+
+
+df_f <- data.frame(counts = c(978, dim(empirical_cdk %>% filter(!(enzyme_genesymbol %in% c("CDK1", "CDK2"))))[1], sum(empirical_cdk$AccMod %in% psp_signor)),
+                    type = factor(c("PSP + SIGNOR", "Petrosius et al",  "Overlap"), levels = c("PSP + SIGNOR",  "Petrosius et al", "Overlap")))
+
+
+ggplot(subset(df_f, type != "Overlap"), aes(x = type, y = counts, label = counts, fill = type)) +
+    geom_bar(stat = "identity") +
+    theme_prism() + 
+    scale_y_continuous(guide = "prism_offset") + 
+    scale_fill_manual(values= c("grey40", "#007094")) + 
+    theme(axis.text.x = element_text(angle = 90), legend.position = "none") +
+    #geom_text( vjust = -0.1, size =6, aes(color = type)) +
+    scale_color_manual(values= c("grey40", "#007094")) + 
+    xlab("") + ylab("Count")
+```
+
+
+```{r}
+#Adding data from petrone et al 2016.
+
+petrone <- readxl::read_excel("data/petrone.xlsx")
+
+#Just taking the needed columns
+pet <- petrone[c(2,3,15:19)] %>% 
+                            na.omit() %>% 
+                            separate(Reference, sep = ";", into = c("A", "Accession", "UniprotName")) %>% 
+                            separate_rows('phosphorylation site', sep = ":") %>% 
+                            separate_rows('phosphorylation site', sep = ",") %>% 
+                            mutate(AccMod = paste(Accession, `phosphorylation site`, sep = ":")) %>%
+                            filter(!duplicated(AccMod))
+
+#Make new data frame with all the possible sites 
+
+emp <- tt_rank %>% select(GeneName, Accession, MasterMod, logFC_20min:FDR_90min, AssignedCluster, enzyme_genesymbol, GeneMod) %>% 
+                mutate(AccMod = paste(Accession, MasterMod, sep = ":"),
+                       theoretical = ifelse(GeneMod %in% theoretical_cdk$GeneMod, "yes", "np"),
+                       empirical = ifelse(GeneMod %in% empirical_cdk$GeneMod, "yes", "no")) %>% 
+                filter(!duplicated(AccMod))
+            
+pet2 <- left_join(pet, emp, by = "AccMod")
+
+
+pred_cdk_df <- pet2 %>% filter(!is.na(empirical)) %>% 
+                        mutate(type = case_when(empirical == "yes" & !grepl("CDK", enzyme_genesymbol) ~ "Predicted",
+                                                grepl("CDK", enzyme_genesymbol) ~ "Annotated",
+                                                empirical != "yes" & !grepl("CDK", enzyme_genesymbol) ~ "Non-CDK")) %>% 
+                        mutate(s = case_when(`RO p-value` < 0.05 & `RO H:L Ratio (Ave.)` < 0 ~ "Downregulated",
+                                             `RO p-value` < 0.05 & `RO H:L Ratio (Ave.)` > 0 ~ "Upregualted",
+                                             `RO p-value` > 0.05 ~ "NS"))
+
+f1 <- pred_cdk_df %>% count(type) %>% mutate(s = "Total", n = n, f = 1)
+f2 <- pred_cdk_df %>% group_by(type) %>% count(s) %>% 
+                        summarise(f = n/sum(n)) 
+
+f3 <- pred_cdk_df %>% group_by(type) %>% count(s) %>% ungroup() %>% mutate(f = f2$f) %>% bind_rows(f1) %>% 
+        mutate(s = factor(s, levels = c("Total", "NS", "Downregulated", "Upregualted")),
+               n = paste(n, ")", sep = ""), n = paste("(", n, sep = "")) %>% 
+               mutate(type = factor(type, levels = c("Non-CDK", "Annotated", "Predicted")))
+
+#Barplot
+ggplot(subset(f3, s != "Total"), aes(x = s, y = f, fill = type, label = round(f,2))) + 
+        geom_bar(stat = "identity") + 
+        facet_grid(cols = vars(type)) + 
+        #geom_text(size = 5, hjust = -0.1) + 
+        #geom_text(data = subset(f3, s != "Total"), aes(x = type, y = f, fill = type, label = n), size = 6, vjust = 10) +
+        ggprism::theme_prism() + 
+        scale_fill_manual(values = c("grey40", "#4B0055", "#007094")) +
+        theme(legend.position = "right",
+              axis.text.x = element_text(angle = 90)) +
+        xlab("") + ylab("Fraction of sites") +
+        scale_y_continuous(guide = "prism_offset")
+```
+
+```{r}
+#Volcano plot 
+ggplot(subset(pred_cdk_df, type == "Non-CDK"), aes(x = `RO H:L Ratio (Ave.)`, y = -log10(`RO p-value`))) + 
+    geom_point(color = "grey") +
+    geom_point(data = subset(pred_cdk_df, type == "Annotated"), color = "#4B0055",size = 2) +
+    geom_point(data =subset(pred_cdk_df, type == "Predicted"), color = "#007094",size = 2) + 
+    theme_prism() + 
+    scale_y_continuous(guide = "prism_offset_minor") +
+    scale_x_continuous(guide = "prism_offset_minor") +
+    xlab("Fold change after CDK1i") + 
+    ylab("-log10(p-val)") +
+    xlim(c(-6,6))
+```
+
+
+```{r}
+
+```

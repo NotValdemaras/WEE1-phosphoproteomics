@@ -1,0 +1,231 @@
+---
+title: "Kinase activity analysis"
+author: "Valdemaras Petrosius"
+date: "16.06.2021"
+output: 
+    html_document:
+        toc: true
+        theme: united
+---
+
+```{r}
+#Setting for the notebook. Chucks are excluded unless indicated otherwise
+knitr::opts_chunk$set(knitr::opts_chunk$set(include = FALSE, warning = FALSE, echo = FALSE, fig.width = 10, fig.height = 6))
+```
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(ggprism)
+#For KSEA 
+tt_rank <- readRDS("data/tt_kinaseRank.rds") 
+```
+
+
+
+# Trying to model kinase activity based on substrate logFC and scaled abundance at specific time points as normal distributions 
+
+```{r}
+#Preparing the dataframe
+
+#Removing sites with no kinase annotation
+kinData <- tt_rank %>% filter(!is.na(enzyme_genesymbol))
+#List of kinases with atleast 5 substrates
+suitable_kinases <- kinData %>% count(enzyme_genesymbol) %>% filter(n >4)
+#Filtering for kinases with atleast 5 substrates
+kinData_s <- kinData %>% filter(enzyme_genesymbol %in% suitable_kinases$enzyme_genesymbol)
+#Split data into nested list 
+kinData_s2 <- kinData_s %>% dplyr::select(logFC_20min, logFC_40min, logFC_60min, logFC_90min)
+kinData_split <- split(kinData_s2, f= kinData_s$enzyme_genesymbol)
+```
+
+```{r}
+# trying with z score since logFC does not reall work
+
+#Removing rows 769-770 due to a zero 
+kinData_s2 <- kinData_s[-769,]
+kinData_s2 <- kinData_s2[-769,]
+
+kinData2 <- t(apply(kinData_s2[10:24], 1, scale)) %>% as.data.frame() %>%
+                mutate(enzyme_genesymbol = kinData_s2$enzyme_genesymbol)
+
+kinData_stats <- kinData2 %>% 
+                    left_join(suitable_kinases, by ="enzyme_genesymbol") %>% 
+                    group_by(enzyme_genesymbol) %>% 
+                    summarise(avg.v1 = sum(V1)/sqrt(n),
+                              avg.v2 = sum(V2)/sqrt(n),
+                              avg.v3 = sum(V3)/sqrt(n),
+                              avg.v4 = sum(V4)/sqrt(n),
+                              avg.v5 = sum(V5)/sqrt(n),
+                              avg.v6 = sum(V6)/sqrt(n),
+                              avg.v7 = sum(V7)/sqrt(n),
+                              avg.v8 = sum(V8)/sqrt(n),
+                              avg.v9 = sum(V9)/sqrt(n),
+                              avg.v10 = sum(V10)/sqrt(n),
+                              avg.v11 = sum(V11)/sqrt(n),
+                              avg.v12 = sum(V12)/sqrt(n),
+                              avg.v13 = sum(V13)/sqrt(n),
+                              avg.v14 = sum(V14)/sqrt(n),
+                              avg.v15 = sum(V15)/sqrt(n)) %>% 
+                               distinct() 
+
+
+myGroup <- factor(rep(c("min0", "min20", "min40", "min60", "min90"),3), levels = c("min0", "min20", "min40", "min60", "min90"))
+design <- model.matrix(~myGroup + 0, myGroup)
+timeCourseFit <- apply(kinData_stats[,2:16], 1, function(x) coefficients(summary(lm(x ~ myGroup + 0))))[1:6,]
+timeCourseDf <- tibble(enzyme_genesymbol = kinData_stats$enzyme_genesymbol,
+                           min0 = timeCourseFit[1,],
+                           min20 = timeCourseFit[2,],
+                           min40 = timeCourseFit[3,],
+                           min60 = timeCourseFit[4,],
+                           min90 = timeCourseFit[5,],
+                           Er = timeCourseFit[6,])
+
+#Function for min max normalization 
+normalize <- function(x, na.rm = TRUE) {
+    return((x- min(x)) /(max(x)-min(x)))
+}
+
+#timeCourseDf_norm <- timeCourseDf;timeourseDf_norm[2:6] <- t(apply(timeCourseDf_norm[,2:6], 1, normalize))
+```
+
+```{r}
+#plot the z scores to see if there are non linear trends that are worth fitting 
+df <- timeCourseDf %>% gather(timePoint, z_score, min0:min90)
+ggplot(df, aes(x = timePoint, y = z_score, group = enzyme_genesymbol, color =enzyme_genesymbol,
+                ymin = z_score - Er, ymax = z_score +Er)) +
+            geom_point(size =2 ) +
+            geom_linerange()+
+            facet_wrap(vars(enzyme_genesymbol)) +
+            geom_hline(yintercept = 0, color ="black", linetype ="dashed", size = 1) +
+            geom_smooth(method = "loess", formula = y ~ x)
+
+```
+
+# Making some new plots for kinase activity time course
+```{r}
+#Adjusting for z-scores so that is it easier to compare absolute changes in activity 
+df2 <- df %>%
+                group_by(enzyme_genesymbol) %>%
+                mutate(z_score_adj = z_score + abs(min(z_score))) 
+
+
+ggplot(df2, aes(x = timePoint, y = z_score_adj, group = enzyme_genesymbol, color =enzyme_genesymbol,
+                ymin = z_score_adj - Er, ymax = z_score_adj +Er)) +
+            geom_point(size =2 ) +
+            geom_line(size =1) +
+            geom_linerange(color = "black")+
+            facet_wrap(vars(enzyme_genesymbol)) +
+            geom_hline(yintercept = 0, color ="black", linetype ="dashed", size = 1) +
+            theme(legend.position = "none")
+
+cdk_df <- df2 %>% filter(enzyme_genesymbol %in% c("CDK1", "CDK2"))
+
+#Make a vector that shows the change in value   
+z_shif <- c(cdk_df$z_score_adj[1:2],
+            cdk_df$z_score_adj[3:4] - cdk_df$z_score_adj[1:2],
+            cdk_df$z_score_adj[5:6] - cdk_df$z_score_adj[3:4],
+            cdk_df$z_score_adj[7:8] - cdk_df$z_score_adj[5:6],
+            cdk_df$z_score_adj[9:10] - cdk_df$z_score_adj[7:8])   
+#Propagating the error
+z_shif_er <- c(cdk_df$Er[1:2],
+            sqrt(cdk_df$Er[3:4]**2 + cdk_df$Er[1:2]**2),
+            sqrt(cdk_df$Er[5:6]**2 + cdk_df$Er[3:4]**2),
+            sqrt(cdk_df$Er[7:8]**2 + cdk_df$Er[5:6]**2),
+            sqrt(cdk_df$Er[9:10]**2 + cdk_df$Er[7:8]**2))
+#Append the values to dataframe
+cdk_df <-  cdk_df %>% ungroup() %>% mutate(z_shift = z_shif,
+                            z_shift_er = z_shif_er) %>%
+            mutate(timePoint = as.numeric(gsub("min", "", timePoint)))
+
+ggplot(cdk_df, aes(x = timePoint, y = z_shift, ymin = z_shift - z_shift_er, ymax = z_shift +z_shift_er, color = enzyme_genesymbol)) +
+        geom_linerange() + 
+        facet_grid(col = vars(enzyme_genesymbol)) + 
+        geom_point(size =2 ) +
+        theme_prism(border = F) +
+        scale_x_continuous(breaks = c(0,20,40,60,90)) +
+                scale_y_continuous(guide = "prism_offset") +
+        geom_linerange(color = "black")+
+        facet_wrap(vars(enzyme_genesymbol), nrow = 1) +
+        theme(legend.position = "none") +
+        xlab("Time, min") +
+        geom_hline(yintercept = 0, linetype="dashed", size =1, color = "grey50") +
+        ggsci::scale_color_aaas() +
+        geom_smooth(formula = y ~x, se = T, alpha = 0.1) +
+        #scale_color_manual(values = hcl.colors(10,"viridis")[3:10]) +
+        ylab("Activity Shift") +
+        ylim(c(-1,6))
+
+```
+
+```{r}
+cdk_only <- df2 %>% filter(grepl("CDK", enzyme_genesymbol))  %>%
+            mutate(timePoint = gsub("min", "", timePoint))
+ggplot(cdk_only, aes(x = timePoint, y = z_score_adj, group = enzyme_genesymbol, color =enzyme_genesymbol,
+                ymin = z_score_adj - Er, ymax = z_score_adj +Er)) +
+            geom_point(size =2 ) +
+            geom_line(size =1) +
+            theme_prism(border = F) +
+            scale_y_continuous(guide = "prism_offset") +
+            geom_linerange(color = "black")+
+            facet_wrap(vars(enzyme_genesymbol), nrow = 1) +
+            theme(legend.position = "none") +
+            xlab("Time, min") +
+            geom_hline(yintercept = abs(qnorm(0.01)), linetype="dashed", size =1, color = "red") +
+            ggsci::scale_color_npg() +
+
+            #scale_color_manual(values = hcl.colors(10,"viridis")[3:10]) +
+            ylab("RKA")
+```
+
+
+```{r}
+
+myKinases2 <- c("AURKB", "AURKA", "PLK1")
+myKinases3 <- c("CSNK2A1","CSNK2A2", "AKT1", "AKT2", "AKT3", "MTOR", "RPS6KA1", "ATR", "MAPK1", "DYRK2")
+myKinases4 <- c("MTOR", "DYRK2", "CSNK2A1", "CSNK2A2", "AKT2")
+spec_only <- df2 %>% filter(enzyme_genesymbol %in% myKinases4)  %>%
+            mutate(timePoint = gsub("min", "", timePoint)) %>% 
+            mutate(z_score_adj = z_score - abs(max(z_score)),
+                   enzyme_genesymbol = factor(enzyme_genesymbol, levels = myKinases4))  # use only for the downregulated kinases
+ggplot(spec_only, aes(x = timePoint, y = z_score_adj, group = enzyme_genesymbol, color =enzyme_genesymbol,
+                ymin = z_score_adj - Er, ymax = z_score_adj +Er)) +
+            geom_point(size =2 ) +
+            geom_line(size =1) +
+            theme_prism() +
+            scale_y_continuous(guide = "prism_offset_minor") +
+            geom_linerange(color = "black")+
+            facet_wrap(vars(enzyme_genesymbol), ncol = 5) +
+            theme(legend.position = "none") +
+            xlab("Time, min") +
+            geom_hline(yintercept = -abs(qnorm(0.01)), linetype="dashed", size =1, color = "cadetblue") +
+            #scale_color_manual(values = hcl.colors(20,"viridis")[5:20]) +
+            ggsci::scale_color_jama() +
+            ylab("RKA")
+```
+
+# plot correlation between kinase activity 
+
+```{r}
+library(corrplot)
+
+#transforming data for correlation plot 
+
+
+
+kinase_corr <- as.data.frame(t(timeCourseDf[2:6]))
+    
+colnames(kinase_corr) <- timeCourseDf$enzyme_genesymbol
+
+kinase_corr2 <- apply(kinase_corr, 2, function(x) x + abs(min(x)))
+#Filter for atleast 5 substrates
+M <- cor(kinase_corr2)
+M2 <- Hmisc::rcorr(as.matrix(kinase_corr2))
+#M2 <- mpmi::cmi(kinase_corr2)
+#colnames(M2$mi) <-  timeCourseDf$enzyme_genesymbol
+#rownames(M2$mi) <-  timeCourseDf$enzyme_genesymbol
+LabelCol = c(rep("black", 58)); LabelCol[c(2,3,4,5,6)] <- "#003560"
+corrplot(M2$r, method = "color", type = "full", order="hclust", 
+            col = rev(hcl.colors(n =100, palette = "RdBu")),
+            tl.cex = 1, tl.col=LabelCol, sig.level = 0.1)
+```

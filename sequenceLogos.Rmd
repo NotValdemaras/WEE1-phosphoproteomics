@@ -1,0 +1,303 @@
+---
+title: "Analysis of kinase motifs in clusters"
+author: "Valdemaras Petrosius"
+date: "22.06.2021"
+output: 
+    html_document:
+        toc: true
+        theme: united
+---
+
+```{r}
+#Setting for the notebook. Chucks are excluded unless indicated otherwise
+knitr::opts_chunk$set(knitr::opts_chunk$set(include = FALSE, warning = FALSE, echo = FALSE, fig.width = 18, fig.height = 14))
+```
+
+```{r}
+library(tidyverse)
+library(ggseqlogo)
+library(ggprism)
+library(ggpubr)
+source("functions.R")
+tt_rank <- readRDS("data/tt_kinaseRank_updated_clust.rds")
+potential_cdk <- readRDS("data/potential_cdk.rds")
+```
+
+
+# LOGO generation
+```{r applying the binomial model for sequence logo generation}
+
+old_cluster <- readRDS("clusters_old.rds") %>% dplyr::rename(AssignedClusterOld = AssignedCluster)
+tt_rank <- readRDS("data/tt_kinaseRank_updated_clust.rds") %>% mutate(AccMod = paste(Accession, MasterMod, sep = ":")) %>%
+                left_join(old_cluster %>% select(-MasterMod), by = c("GeneMod")) %>% 
+                select(-AssignedCluster) %>% rename(AssignedCluster = AssignedClusterOld)
+
+#Splitting the motif into single amino acids for pLogo generation 
+#Setting new colnames for split animo acids
+myCols <- paste("A", 0:21, sep = "")
+#Spliting the phosphorylation site motif into single amino acids per column 
+tt_aa <- tt_rank %>% 
+                    separate(motif, sep = "", into = myCols) %>% 
+                    dplyr::select(AssignedCluster, A1:A21) %>% 
+                    drop_na() %>%
+                    distinct()
+
+tt_aa.split <- split(tt_aa[-1], f= tt_aa$AssignedCluster) 
+names(tt_aa.split) <- paste("Cluster", 1:8, sep = "")
+
+bkg04 <- readRDS("data/backgroundFrequency.rds") %>%  dplyr::filter(disorder == 0.5) # background frequencies based on disorder predictio 
+rownames(bkg04) <- bkg04$AminoAcid
+```
+
+
+```{r}
+cdk_score<- tt_rank %>% 
+            group_by(AssignedCluster) %>%
+            summarise(med = median(CDK1, na.rm = TRUE),
+                      er = mad(CDK1, na.rm = TRUE)) %>%
+            mutate(mycol = c(rep("a",6), "b", "b"),
+                   AssignedCluster = factor(AssignedCluster, levels = 8:1))
+
+ggplot(cdk_score, aes(x = AssignedCluster, y = med, color = mycol)) + 
+        geom_pointrange(aes(ymin = med - er, ymax = med + er), size = 1) + 
+        scale_color_manual(values = c("grey50", "tomato2", "gold2")) +
+        theme_prism() +
+        scale_y_continuous(guide = "prism_offset") +
+        theme(legend.position = "none") +
+        ylab("CDK1 substrate probability score") +
+        xlab("Assigned Cluster") + 
+        geom_hline(yintercept = 0.5, linetype="dashed", color = "grey", size = 1) +
+        coord_flip()  
+        #scale_x_continuous(breaks = seq(1, 8, by = 1)) +
+        #ggtitle("CDK1")
+```
+
+```{r function for generating the logos}
+#Calcualtes aminoAcid frequency
+calcCount <- function(df) {
+#Count the amino acids at specific position 
+aa_table <- apply(df,2,function(x)table(x))
+
+#Generate a dataframe to merge to 
+temp <- data.frame(AminoAcid =  c("A", "R", "N", "D", "C", "Q", "E", "G", "H", "I", "L", "K", "M", "F", "P", "S", "T", "W", "Y", "V"))
+
+#Loop the process
+for (i in 1:length(aa_table)) {
+    #covert the nested table to dataframe
+    temp2 <- data.frame(aa_table[i])
+    #Merge
+    colnames(temp2) <- c("AminoAcid", names(aa_table[i]))
+    temp <- left_join(temp, temp2, by = c("AminoAcid"))
+
+}
+#Fill NA with 0
+temp[is.na(temp)] <- 0 
+#Move aminoAcid column
+temp <- temp[-1]
+
+#Setting rownames
+rownames(temp) <- c("A", "R", "N", "D", "C", "Q", "E", "G", "H", "I", "L", "K", "M", "F", "P", "S", "T", "W", "Y", "V")
+
+temp
+
+}
+
+#Calculates the log Odds log binomial probability of over or under representation
+calcBinomProb <- function(df, N, bkg){
+    # df - dataframe where the rows are amino acids and columns positions 
+    #Filled with counts for that specific position. Outlut from calcCount function.
+    #bkg - matrix containing background frequencies for amino acids at specific position 
+    #Output from calcFreq function.
+    #both input variables need to have the same dimensions!
+    #N - total number of motifs used
+    #Set dimensions
+    N_col <- dim(df)[2]
+    N_row <- dim(df)[1]
+    
+    #Sort Amino acid backgroud frequencies so they are in the same order as the count matrix 
+
+    bkg <- bkg[rownames(df),]
+
+    p1 <- matrix(0, ncol = 21, nrow =20) # probability of overrepresentation
+    rownames(p1) <- rownames(df); colnames(p1) <- colnames(df)
+
+    p2 <- p1 # probability of underrepresentation
+
+    #iterate rows
+    for (i in 1:N_row){
+    #iterate columns
+        for (j in 1:N_col){
+            p1[i,j] <- 1 - pbinom(df[i,j], size = N, p = bkg$Freq[i])
+    }
+    }
+     for (i in 1:N_row){
+        for (j in 1:N_col){
+            p2[i,j] <- pbinom(df[i,j], size = N, p = bkg$Freq[i])
+    }
+    }
+    #Residue height 
+
+    rs <- -log(p1/p2)
+
+    #Change infinity to 20
+
+    rs[is.infinite(rs)] <- 40
+    rs
+}
+
+```
+
+```{r calculate the PSSM for the sequence logos}
+#Calculate aminoacid counts
+cluster_counts <- lapply(tt_aa.split, calcCount)
+#Calculate the total number of motifs in each cluster
+Ns <- unlist(lapply(tt_aa.split, function(x)dim(x)[1]))
+#Calculate the log odds
+binom1 <- calcBinomProb(cluster_counts[[1]], N= Ns[1], bkg04)
+binom2 <- calcBinomProb(cluster_counts[[2]], N= Ns[2], bkg04)
+binom3 <- calcBinomProb(cluster_counts[[3]], N= Ns[3], bkg04)
+binom4 <- calcBinomProb(cluster_counts[[4]], N= Ns[4], bkg04)
+binom5 <- calcBinomProb(cluster_counts[[5]], N= Ns[5], bkg04)
+binom6 <- calcBinomProb(cluster_counts[[6]], N= Ns[6], bkg04)
+binom7 <- calcBinomProb(cluster_counts[[7]], N= Ns[7], bkg04)
+binom8 <- calcBinomProb(cluster_counts[[8]], N= Ns[8], bkg04)
+#binom9 <- calcBinomProb(cluster_counts[[9]], N= Ns[9], bkg04)
+```
+
+```{r make the logos}
+
+#Set thresholf for the residues
+tr <- 5
+f_binom1 <-  binom1
+f_binom1[f_binom1 < tr] <- 0 
+
+f_binom2 <-  binom2
+f_binom2[f_binom2 < tr] <- 0 
+
+f_binom3 <-  binom3
+f_binom3[f_binom3 < tr] <- 0 
+
+f_binom4 <-  binom4
+f_binom4[f_binom4 < tr] <- 0 
+
+f_binom5 <-  binom5
+f_binom5[f_binom5 < tr] <- 0 
+
+f_binom6 <-  binom6
+f_binom6[f_binom6 < tr] <- 0 
+
+f_binom7 <-  binom7
+f_binom7[f_binom7 < tr] <- 0 
+
+f_binom8 <-  binom8
+f_binom8[f_binom8 < tr] <- 0 
+
+#f_binom9 <-  binom9
+#f_binom9[f_binom9 < tr] <- 0 
+
+
+logoPlot <- function(score_matrix, myTitle){
+    #score_matrix - matrix output from the binomial model with residue scores
+    mylabels <- as.character(-10:10)
+    temp <- ggseqlogo(score_matrix, method='custom', seq_type='aa') + 
+        ylab('Residue score') +
+        theme_prism() +
+        scale_y_continuous(guide = "prism_offset_minor") +
+        theme(legend.position = "none",
+              axis.text.y = element_text(colour = "red")) + 
+        ggtitle(myTitle)
+
+    temp$scales$scales[[1]] <- scale_x_continuous(breaks= seq(1,21,by=1),labels= mylabels)
+
+    temp 
+}
+
+
+p1 <-logoPlot(f_binom1, "Cluster 1")
+p2 <- logoPlot(f_binom2, "Cluster 2")
+p3 <- logoPlot(f_binom3, "Cluster 3")
+p4 <- logoPlot(f_binom4, "Cluster 4")
+p5 <- logoPlot(f_binom5, "Cluster 5")
+p6 <- logoPlot(f_binom6, "Cluster 6")
+p7 <- logoPlot(f_binom7, "Cluster 7")
+p8 <- logoPlot(f_binom8, "Cluster 8")
+#p9 <- ggseqlogo(f_binom9, method='custom', seq_type='aa') + ylab('binom probability') +ggtitle("Cluster9")
+
+gridExtra::grid.arrange(p1,p2,p3,p4,p5,p6,p7,p8, ncol =2, nrow =4)
+
+#ggsave("logo7.png", dpi = 300)
+```
+
+```{r make logos for CDK1/2 substrates in clusters}
+cdk_aa <- tt_rank %>%   
+                    filter(AssignedCluster %in% 1:6 | ((CDK1 > .563 | CDK2 > .374 | CDK5 > .452) & FDR_90min < 0.05)) %>%
+                    separate(motif, sep = "", into = myCols) %>% 
+                    select(AssignedCluster, A1:A21) %>% 
+                    drop_na() %>% 
+                    distinct()
+
+
+cdk_aa.split <- split(cdk_aa[-1], f= cdk_aa$AssignedCluster) 
+names(cdk_aa.split) <- paste("Cluster", 1:8, sep = "")
+
+
+#Calculate aminoacid counts
+cdk_cluster_counts <- lapply(cdk_aa.split, calcCount)
+#Calculate the total number of motifs in each cluster
+Ns <- unlist(lapply(cdk_aa.split, function(x)dim(x)[1]))
+#Calculate the log odds
+cdk_binom1 <- calcBinomProb(cdk_cluster_counts[[1]], N= Ns[1], bkg04)
+cdk_binom2 <- calcBinomProb(cdk_cluster_counts[[2]], N= Ns[2], bkg04)
+cdk_binom3 <- calcBinomProb(cdk_cluster_counts[[3]], N= Ns[3], bkg04)
+cdk_binom4 <- calcBinomProb(cdk_cluster_counts[[4]], N= Ns[4], bkg04)
+cdk_binom5 <- calcBinomProb(cdk_cluster_counts[[5]], N= Ns[5], bkg04)
+cdk_binom6 <- calcBinomProb(cdk_cluster_counts[[6]], N= Ns[6], bkg04)
+cdk_binom7 <- calcBinomProb(cdk_cluster_counts[[7]], N= Ns[7], bkg04)
+cdk_binom8 <- calcBinomProb(cdk_cluster_counts[[8]], N= Ns[8], bkg04)
+
+``` 
+
+
+```{r make the logos}
+
+#Set thresholf for the residues
+tr <- 3.75
+f_cdk_binom1 <-  cdk_binom1
+f_cdk_binom1[f_cdk_binom1 < tr] <- 0 
+
+f_cdk_binom2 <-  cdk_binom2
+f_cdk_binom2[f_cdk_binom2 < tr] <- 0 
+
+f_cdk_binom3 <-  cdk_binom3
+f_cdk_binom3[f_cdk_binom3 < tr] <- 0 
+
+f_cdk_binom4 <-  cdk_binom4
+f_cdk_binom4[f_cdk_binom4 < tr] <- 0 
+
+f_cdk_binom5 <-  cdk_binom5
+f_cdk_binom5[f_cdk_binom5 < tr] <- 0 
+
+f_cdk_binom6 <-  cdk_binom6
+f_cdk_binom6[f_cdk_binom6 < tr] <- 0 
+
+f_cdk_binom7 <-  cdk_binom7
+f_cdk_binom7[f_cdk_binom7 < tr] <- 0 
+
+f_cdk_binom8 <-  cdk_binom8
+f_cdk_binom8[f_cdk_binom8 < tr] <- 0 
+
+#f_cdk_binom9 <-  cdk_binom9
+#f_cdk_binom9[f_cdk_binom9 < tr] <- 0 
+
+p1 <- logoPlot(f_cdk_binom1, "Cluster1")
+p2 <- logoPlot(f_cdk_binom2, "Cluster2")
+p3 <- logoPlot(f_cdk_binom3, "")
+p4 <- logoPlot(f_cdk_binom4, "Cluster4")
+p5 <- logoPlot(f_cdk_binom5, "Cluster5")
+p6 <- logoPlot(f_cdk_binom6, "Cluster6")
+p7 <- logoPlot(f_cdk_binom7, "") + scale_y_continuous(guide = "prism_offset",  limits = c(0, 80))
+p8 <- logoPlot(f_cdk_binom8, "") + scale_y_continuous(guide = "prism_offset",  limits = c(0, 80))
+#p9 <- ggseqlogo(f_cdk_binom9, method='custom', seq_type='aa') + ylab('binom probability') +ggtitle("Cluster9")
+
+gridExtra::grid.arrange(p7,p8, ncol =1, nrow =2)
+```

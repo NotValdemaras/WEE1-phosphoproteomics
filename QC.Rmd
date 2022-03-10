@@ -1,0 +1,304 @@
+---
+title: "Quality control"
+author: "Valdemaras Petrosius"
+date: "12.01.2021"
+output: 
+    html_document:
+        toc: true
+        theme: united
+---
+
+```{r}
+#Setting for the notebook. Chucks are excluded unless indicated otherwise
+knitr::opts_chunk$set(knitr::opts_chunk$set(include = FALSE, warning = FALSE, echo = FALSE, fig.width = 14, fig.height = 6))
+```
+
+```{r load packages and data}
+#packages
+source("loadPackages.R")
+source("functions.R")
+library(ggprism)
+#protein abundances
+protG <- read.delim("data/protein.txt", sep = "\t")
+protP <- read.delim("data/phos_protein.txt", sep = "\t")
+
+#peptides abundances
+peptideG <- read.delim("data/peptides.txt", sep = "\t")
+peptideP <- read.delim("data/phos_peptides.txt", sep  = "\t")
+```
+
+
+```{r extracting the abundance columns}
+mySamples <- paste("V", 1:15, sep = "")
+mySamples2 <- paste("V", 1:16, sep = "")
+#Protein
+datProtG <- PDextract(protG, "F1", "EMPTY", mySamples)
+datProtP <- PDextract(protP, "F1", "EMPTY", mySamples2)
+#Peptide
+datPepG <- PeptideExtract(peptideG, "F1", "EMPTY", mySamples)
+datPepP <- PeptideExtract(peptideP, "F1", "EMPTY", mySamples2) 
+
+#Fixing a mistake with column labeling present in the PD data (Sample V9)
+datProtP <- datProtP %>% select(-V9)
+datPepP <- datPepP %>% select(-V9)
+
+names(datProtP) <- mySamples
+names(datPepP) <- c("Accession", "Modifications", "Sequence", mySamples)
+```
+
+```{r detection summary, include = TRUE} 
+
+paste("Detected proteins in proteome:" , dim(datProtG)[1])
+paste("Detected proteins in phosphoproteome:" , dim(datProtP)[1])
+
+paste("Detected peptides in proteome:" , dim(datPepG)[1])
+paste("Detected peptides in phosphoproteome:" , dim(datPepP %>% filter(grepl("Phospho", Modifications) & grepl("TMT", Modifications)))[1])
+```
+
+```{r quick detection plot}
+detection <- data.frame(type = c("Protein", "Phosphoprotein", "phosphopeptides"), 
+                        counts = c(dim(datProtG)[1], dim(datProtP)[1], dim(datPepP %>% filter(grepl("Phospho", Modifications) & grepl("TMT", Modifications)))[1]))
+
+ggplot(detection, aes(x = type, y = counts, label = counts)) +
+        geom_bar(stat = "identity") + 
+        geom_label() +
+        coord_flip() + 
+        theme_bw() +
+        theme(aspect.ratio = 1/3) +
+        xlab("") + ylab("Count")
+```
+# Protein 
+
+## RAW data boxplots and PCA
+```{r plotting boxplots of raw data, include = TRUE}
+myCols <- c(rep(hcl.colors(n=5, palette = "viridis"),3))
+par(mfrow=c(1,2))
+boxplot(as.matrix(log2(datProtG)), las = 2, main="Proteome", col= myCols)
+boxplot(as.matrix(log2(datProtP)), las = 2, main="Phosphoproteome", col= myCols)
+```
+
+```{r plotting pca of raw data, include = TRUE}
+myLabels <- rep(c("0min", "20min", "40min", "60min", "90min"),3)
+p1 <- myPCA(datProtG, myLabels, "Proteome RAW")
+
+p2 <- myPCA(datProtP, myLabels, "Phosphoproteome RAW")
+
+gridExtra::grid.arrange(p1,p2, ncol = 2)
+```
+
+## Sample loading normalization 
+```{r applying sample loading normalization}
+datProtG_SL <- SL_normalization(datProtG)
+datProtP_SL <- SL_normalization(datProtP)
+```
+
+```{r plotting boxplots of sl data, include = TRUE}
+par(mfrow=c(1,2))
+boxplot(as.matrix(log2(datProtG_SL)), las = 2, main="Proteome", col= myCols)
+boxplot(as.matrix(log2(datProtP_SL)), las = 2, main="Phosphoproteome", col= myCols)
+```
+
+```{r plotting pca of sl data, include = TRUE}
+p1 <- myPCA(datProtG_SL, myLabels, "Proteome SL")
+
+p2 <- myPCA(datProtP_SL, myLabels, "Phosphoproteome SL")
+
+gridExtra::grid.arrange(p1,p2, ncol = 2)
+```
+
+## Internal reference standart normalization 
+```{r}
+datProtG_IRS <- IRS_normalization(datProtG_SL)
+datProtP_IRS <- IRS_normalization(datProtP_SL)
+```
+
+
+```{r plotting boxplots of irs data, include = TRUE}
+par(mfrow=c(1,2))
+boxplot(as.matrix(log2(datProtG_IRS)), las = 2, main="Proteome", col= myCols)
+boxplot(as.matrix(log2(datProtP_IRS)), las = 2, main="Phosphoproteome", col= myCols)
+```
+
+```{r plotting pca of irs data, include = TRUE}
+p1 <- myPCA(na.omit(datProtG_IRS), myLabels, "Proteome")
+
+p2 <- myPCA(na.omit(datProtP_IRS), myLabels, "Phosphoproteome")
+
+gridExtra::grid.arrange(p1,p2, ncol = 2)
+```
+ 
+
+```{r}
+saveData = FALSE 
+
+if (saveData){
+    saveRDS(datProtG_IRS, "data/datProtG.rds")
+    saveRDS(datProtP_IRS, "data/datProtP.rds")
+}
+```
+
+# Peptide
+
+## RAW data boxplots and PCA
+```{r peptide plotting boxplots of raw data, include = TRUE}
+myCols <- c(rep(hcl.colors(n=5, palette = "viridis"),3))
+par(mfrow=c(1,2))
+boxplot(as.matrix(log2(datPepG[4:18])), las = 2, main="Proteome", col= myCols)
+boxplot(as.matrix(log2(datPepP[4:18])), las = 2, main="Phosphoproteome", col= myCols)
+```
+
+```{r peptide plotting pca of raw data, include = TRUE}
+myLabels <- rep(c("0min", "20min", "40min", "60min", "90min"),3)
+p1 <- myPCA(datPepG[4:18], myLabels, "Proteome RAW")
+
+p2 <- myPCA(datPepP[4:18], myLabels, "Phosphoproteome RAW")
+
+gridExtra::grid.arrange(p1,p2, ncol = 2)
+```
+
+
+## Sample loading normalization 
+```{r peptide applying sample loading normalization}
+datPepG_SL <- SL_normalization(datPepG[4:18]); datPepG_SL <- cbind(datPepG[1:3], datPepG_SL)
+datPepP_SL <- SL_normalization(datPepP[4:18]); datPepP_SL <- cbind(datPepP[1:3], datPepP_SL)
+```
+
+```{r peptide plotting boxplots of sl data, include = TRUE}
+par(mfrow=c(1,2))
+boxplot(as.matrix(log2(datPepG_SL[4:18])), las = 2, main="Proteome", col= myCols)
+boxplot(as.matrix(log2(datPepP_SL[4:18])), las = 2, main="Phosphoproteome", col= myCols)
+```
+
+```{r peptide plotting pca of sl data, include = TRUE}
+p1 <- myPCA(datPepG_SL[4:18], myLabels, "Proteome SL")
+
+p2 <- myPCA(datPepP_SL[4:18], myLabels, "Phosphoproteome SL")
+
+gridExtra::grid.arrange(p1,p2, ncol = 2)
+```
+
+## Internal reference standart normalization 
+```{r}
+datPepG_IRS <- IRS_normalization(datPepG_SL[4:18]); datPepG_IRS <- cbind(datPepG_SL[1:3], datPepG_IRS)
+datPepP_IRS <- IRS_normalization(datPepP_SL[4:18]); datPepP_IRS <- cbind(datPepP_SL[1:3], datPepP_IRS)
+```
+
+
+```{r peptide plotting boxplots of irs data, include = TRUE}
+par(mfrow=c(1,2))
+boxplot(as.matrix(log2(datPepG_IRS[4:18])), las = 2, main="Proteome", col= myCols)
+boxplot(as.matrix(log2(datPepP_IRS[4:18])), las = 2, main="Phosphoproteome", col= myCols)
+```
+
+```{r peptide plotting pca of irs data, include = TRUE}
+p1 <- myPCA(na.omit(datPepG_IRS[4:18]), myLabels, "Proteome IRS")
+
+p2 <- myPCA(na.omit(datPepP_IRS[4:18]), myLabels, "Phosphoproteome IRS")
+
+gridExtra::grid.arrange(p1,p2, ncol = 2)
+```
+
+# Merging duplicated pepetides with different TMT labelling 
+```{r adding the peptides detected in the proteome sample}
+#Extracting phosphopeptides from proteome
+protPhosphopeptides <- datPepG_IRS %>% dplyr::filter(grepl("Phospho", Modifications)) #no phospho peptides in proteome sample probably was not seach for them 
+#Appending to the phosphopeptide data
+phosPeptides <- datPepP_IRS %>% dplyr::filter(grepl("Phospho", Modifications))
+```
+```{r merging peptides with the same modification }
+phosPeptides <- mergePeptides(phosPeptides)
+```
+
+
+```{r adjust peptides for protein abundance (unphosphorylated)}
+adjustPeptides = TRUE
+if (adjustPeptides) {
+#Fitting protein means
+mygroup <- factor(rep(c("min0", "min20", "min40", "min60", "min90"),3), levels = c("min0", "min20", "min40", "min60", "min90"))
+design <- model.matrix(~mygroup + 0)
+protFit <- apply(na.omit(datProtG_IRS), 1, function(x) coefficients(summary(lm(x~mygroup+0))))
+#Coverting into df and calculating the scalling factor
+protDf <- data.frame(min0 = protFit[1,],
+                 min20 = protFit[2,],
+                 min40 = protFit[3,],
+                 min60 = protFit[4,],
+                 min90 = protFit[5,])
+                
+protDf$minVal <- apply(protDf,1,function(x) min(x))
+rownames(protDf) <- colnames(protFit)
+protDf <- as.data.frame(protDf[1:5]/protDf$minVal)
+#Fill missing entries with 1 
+missingProteins <- unique(phosPeptides$Accession[!(phosPeptides$Accession %in% rownames(protDf))])
+missingDf <- data.frame(matrix(1, length(missingProteins), 5))
+rownames(missingDf) <- missingProteins;colnames(missingDf) <- colnames(protDf)
+#Combining 
+protDf <- rbind(protDf, missingDf) %>% rownames_to_column("Accession")
+
+#Merging with peptide data 
+datPepPadj <- phosPeptides %>% left_join(protDf, by = "Accession")
+
+#adjusting the values 
+datPepPadj[4:8] <- datPepPadj[4:8]/datPepPadj[20:24]
+datPepPadj[9:13] <- datPepPadj[9:13]/datPepPadj[20:24]
+datPepPadj[14:18] <- datPepPadj[14:18]/datPepPadj[20:24]
+#removing the scalling factor columns
+datPepPadj <- datPepPadj[1:18]
+}
+```
+
+```{r import ptm localization data from PD, collapse peptides with the same GeneMod and merge to top table}
+info <- readRDS("data/infoP.rds")
+#merging by Accession 
+phos <- left_join(datPepPadj, info, by = c("Accession", "Sequence", "Modifications")) %>% as.data.frame()
+
+phos <- phos %>% 
+            group_by(GeneMod) %>% # group peptides with the exact same modification
+            mutate_at(vars(colnames(phos[4:18])), sum) %>% # sum the abundances (leaves duplicated rows)
+            filter(!duplicated(GeneMod))  %>% # remove the left over duplicated rows from previous line
+            as.data.frame() # convert to df as tibbles suck
+```
+
+```{r}
+saveData = FALSE 
+
+if (saveData){
+    saveRDS(datPepG_IRS, "data/datPepG.rds")
+    saveRDS(phos, "data/phos.rds")
+
+}   
+```
+
+
+## Plot for the CDK1/2/3 T-loop phosphorylation
+```{r quick plot for inhibitory phosphorylation}
+phos <- readRDS("data/phos.rds")
+mygroup <- factor(rep(c("min0", "min20", "min40", "min60", "min90"),3), levels = c("min0", "min20", "min40", "min60", "min90"))
+design <- model.matrix(~mygroup + 0)
+tloop <- phos %>% filter(grepl("P06493", Accession))
+tloop2 <- t(apply(tloop[4:18],1, scale))
+tloopFit <- apply(na.omit(tloop2), 1, function(x) coefficients(summary(lm(x~mygroup+0))))
+
+tloopDf <- data.frame(min0 = tloopFit[1,],
+                 min20 = tloopFit[2,],
+                 min40 = tloopFit[3,],
+                 min60 = tloopFit[4,],
+                 min90 = tloopFit[5,],
+                 er = tloopFit[6,],
+                 site = c("T14;Y15", "T14")) %>% 
+                 gather(timePoint,Abundance, c(-site, -er)) %>% 
+                 mutate(Abundance_adj = ifelse(site == "T14",Abundance + abs(min(Abundance)), Abundance - abs(min(Abundance))),
+                        timePoint = gsub("min", "", timePoint)) 
+
+
+ggplot(subset(tloopDf, site != "-"), aes(x = timePoint, y = Abundance_adj, color = site, group = site)) + 
+       geom_point(size = 3) + 
+       geom_linerange(aes(ymax = Abundance_adj + er, ymin = Abundance_adj -er), color = "black" , size = 1) + 
+       geom_line(size  = 1.5) +
+       geom_hline(yintercept =  0, color = "grey", linetype = "dashed", size = 2)+
+       facet_grid(col = vars(site)) +
+       ggprism::theme_prism() +
+       theme(legend.position ="none") +
+       scale_y_continuous(guide = "prism_offset") +
+       scale_color_manual(values = hcl.colors(n=3, palette= "viridis")) +
+       xlab("Time, min") + ylab("Adjusted z-score")
+```

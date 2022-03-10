@@ -1,0 +1,372 @@
+---
+title: "PSSM calculation"
+author: "Valdemaras Petrosius"
+date: "04.08.2021"
+output: 
+    html_document:
+        toc: true
+        theme: united
+---
+
+```{r}
+#Setting for the notebook. Chucks are excluded unless indicated otherwise
+knitr::opts_chunk$set(knitr::opts_chunk$set(include = FALSE, warning = FALSE, echo = FALSE, fig.width = 10, fig.height = 6))
+```
+
+```{r importing data}
+library(tidyverse)
+library(pbapply)
+library(ggprism)
+source("myScripts/motifData.R") # import omnipath database with generate motif surounding phosphorylation site
+
+bkg <- readRDS("data/backgroundFrequency.rds") # background frequencies based on disorder predictio 
+#Add chemistry labels to amino acids 
+bkg$chemistry <- NA
+bkg$chemistry[grepl("K|R|H|D|E", bkg$AminoAcid)] <- "charged"
+bkg$chemistry[grepl("S|T|N|Q", bkg$AminoAcid)] <- "polar"
+bkg$chemistry[grepl("G|C|P", bkg$AminoAcid)] <- "special case"
+bkg$chemistry[grepl("A|V|I|L|M|F|Y|W", bkg$AminoAcid)] <- "hydrophobic"
+#Remove the atypical amino acids 
+bkg <- bkg %>% dplyr::filter(AminoAcid != "X", AminoAcid != "U")
+
+db <- ptms %>% filter(curation_effort > 2) # setting up phosphodata
+
+# Chekc which kinases can be used for pssm generation 
+good_kinases <- db %>% count(enzyme_genesymbol) %>% arrange(-n) %>% mutate(good = ifelse(n > 20, "yes", "no"))
+#110 goog kinases
+paste("PSSM can be generated for: ", sum(good_kinases$good == "yes"), sep = "")
+```
+
+
+```{r calculate frequencies in phospho motifs excluding the phosphorylation site}
+temp <- db[c(10:19,21:30)]
+t1 <- temp %>% unite("a", A1:A21,sep = "") 
+t2 <- paste(t1$a, collapse = "")
+t3 <- table(unlist(str_split(t2, pattern = "")))
+t4 <- as.data.frame(t3/nchar(t2));colnames(t4) <- c("AminoAcid", "Freq")
+
+t4$chemistry <- NA
+t4$chemistry[grepl("K|R|H|D|E", t4$AminoAcid)] <- "charged"
+t4$chemistry[grepl("S|T|N|Q", t4$AminoAcid)] <- "polar"
+t4$chemistry[grepl("G|C|P", t4$AminoAcid)] <- "special case"
+t4$chemistry[grepl("A|V|I|L|M|F|Y|W", t4$AminoAcid)] <- "hydrophobic"
+t4 <- t4 %>% dplyr::filter(AminoAcid != "X")
+```
+
+```{r checking amino acid frequency depenensy on disorder}
+ggplot(subset(bkg, is.na(bkg) == F & AminoAcid %in% c("S", "T", "P", "L", "V")), aes(x = disorder, y = Freq, color = AminoAcid, group = AminoAcid)) + 
+    geom_point(size = 3) +
+    geom_line(size = 1.) + 
+    #facet_grid(col=vars(chemistry)) +
+    theme_prism() + 
+    theme(legend.key.size = unit(0.4, "cm"), 
+          axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 12)) +
+    ylab("Frequency") + xlab("Disorder cut-off") +
+    ggsci::scale_color_jama() +
+    scale_y_continuous(guide = "prism_offset_minor") +
+    scale_x_continuous(guide = "prism_offset_minor")
+```
+
+```{r calculate amino acid frequency in the motifs overall}
+#Calcualtes aminoAcid frequency
+calcFreq <- function(df) {
+#Count the amino acids at specific position 
+aa_table <- apply(df,2,function(x)table(x))
+
+#Generate a dataframe to merge to 
+temp <- data.frame(AminoAcid =  c("A", "R", "N", "D", "C", "Q", "E", "G", "H", "I", "L", "K", "M", "F", "P", "S", "T", "W", "Y", "V"))
+
+#Loop the process
+for (i in 1:length(aa_table)) {
+    #covert the nested table to dataframe
+    temp2 <- data.frame(aa_table[i])
+    #Merge
+    colnames(temp2) <- c("AminoAcid", names(aa_table[i]))
+    temp <- left_join(temp, temp2, by = c("AminoAcid"))
+
+}
+#Fill NA with 0
+temp[is.na(temp)] <- 0 
+#Move aminoAcid column
+temp <- temp[-1]
+
+#Calculate frequency 
+temp <- temp/dim(df)[1]
+
+#Setting rownames
+rownames(temp) <- c("A", "R", "N", "D", "C", "Q", "E", "G", "H", "I", "L", "K", "M", "F", "P", "S", "T", "W", "Y", "V")
+
+temp
+
+}
+
+test <- calcFreq(db[10:30])
+
+heatmap(as.matrix(test), Rowv = NA, Colv = NA)
+```
+
+```{r}
+cdk1 <- db %>% filter(enzyme_genesymbol == "CDK1")
+mapk14 <- db %>% filter(enzyme_genesymbol == "MAPK14")
+atm <- db %>% filter(enzyme_genesymbol == "ATM") 
+plk1 <- db %>% filter(enzyme_genesymbol == "PLK1") 
+```
+
+
+```{r calculing counts for CDK1 motifs}
+
+#Calcualtes aminoAcid frequency
+calcCount <- function(df) {
+#Count the amino acids at specific position 
+aa_table <- apply(df,2,function(x)table(x))
+
+#Generate a dataframe to merge to 
+temp <- data.frame(AminoAcid =  c("A", "R", "N", "D", "C", "Q", "E", "G", "H", "I", "L", "K", "M", "F", "P", "S", "T", "W", "Y", "V"))
+
+#Loop the process
+for (i in 1:length(aa_table)) {
+    #covert the nested table to dataframe
+    temp2 <- data.frame(aa_table[i])
+    #Merge
+    colnames(temp2) <- c("AminoAcid", names(aa_table[i]))
+    temp <- left_join(temp, temp2, by = c("AminoAcid"))
+
+}
+#Fill NA with 0
+temp[is.na(temp)] <- 0 
+#Move aminoAcid column
+temp <- temp[-1]
+
+#Setting rownames
+rownames(temp) <- c("A", "R", "N", "D", "C", "Q", "E", "G", "H", "I", "L", "K", "M", "F", "P", "S", "T", "W", "Y", "V")
+
+temp
+
+}
+
+
+cdk1_aa <- cdk1[10:30]
+cdk1_count <- calcCount(cdk1_aa)
+
+mapk14_aa <- mapk14[10:30]
+mapk14_count <- calcCount(mapk14_aa)
+
+atm_aa <- atm[10:30]
+atm_count <- calcCount(atm_aa)
+
+plk1_aa <- plk1[10:30]
+plk1_count <- calcCount(plk1_aa)
+```
+
+
+```{r calculating the probability}
+bkg05 <- bkg %>% dplyr::filter(disorder == 0.4)
+rownames(bkg05) <- bkg05$AminoAcid
+
+#Calculates the log Odds log binomial probability of over or under representation
+calcBinomProb <- function(df, N, bkg){
+    # df - dataframe where the rows are amino acids and columns positions 
+    #Filled with counts for that specific position. Outlut from calcCount function.
+    #bkg - matrix containing background frequencies for amino acids at specific position 
+    #Output from calcFreq function.
+    #both input variables need to have the same dimensions!
+    #N - total number of motifs used
+    #Set dimensions
+    N_col <- dim(df)[2]
+    N_row <- dim(df)[1]
+    
+    #Sort Amino acid backgroud frequencies so they are in the same order as the count matrix 
+
+    bkg <- bkg[rownames(df),]
+
+    p1 <- matrix(0, ncol = 21, nrow =20) # probability of overrepresentation
+    rownames(p1) <- rownames(df); colnames(p1) <- colnames(df)
+
+    p2 <- p1 # probability of underrepresentation
+
+    #iterate rows
+    for (i in 1:N_row){
+    #iterate columns
+        for (j in 1:N_col){
+            p1[i,j] <- 1 - pbinom(df[i,j], size = N, p = bkg$Freq[i])
+    }
+    }
+     for (i in 1:N_row){
+        for (j in 1:N_col){
+            p2[i,j] <- pbinom(df[i,j], size = N, p = bkg$Freq[i])
+    }
+    }
+    #Residue height 
+
+    rs <- -log(p1/p2)
+
+    #Change infinity to 20
+
+    rs[is.infinite(rs)] <- 40
+    rs
+}
+
+
+```
+
+```{r }
+cdk1_rs <- calcBinomProb(cdk1_count, dim(cdk1)[1], bkg05)
+mapk14_rs <- calcBinomProb(mapk14_count, dim(mapk14)[1], bkg05)
+atm_rs <- calcBinomProb(atm_count, dim(atm)[1], bkg05)
+plk1_rs <- calcBinomProb(plk1_count, dim(plk1)[1], bkg05)
+```
+
+```{r plot heatmap}
+require(pheatmap)
+p1 <- pheatmap(cdk1_rs, display_numbers = T, cluster_cols = F, cluster_rows = F, main = deparse(substitute(cdk1_rs)))
+p2 <- pheatmap(mapk14_rs, display_numbers = T, cluster_cols = F, cluster_rows = F)
+p3 <- pheatmap(atm_rs, display_numbers = T, cluster_cols = F, cluster_rows = F)
+p4 <- pheatmap(plk1_rs, display_numbers = T, cluster_cols = F, cluster_rows = F)
+```
+
+
+```{r ploting logos}
+require(ggseqlogo)
+
+cdk1_rs2 <-  cdk1_rs
+cdk1_rs2[cdk1_rs2 < 3.75] <- 0 
+
+mapk14_rs2 <-  mapk14_rs
+mapk14_rs2[mapk14_rs2 < 3.75] <- 0 
+
+atm_rs2 <-  atm_rs
+atm_rs2[atm_rs2 < 3.75] <- 0 
+
+plk1_rs2 <-  plk1_rs
+plk1_rs2[plk1_rs2 < 3.75] <- 0 
+
+
+p1 <- ggseqlogo(cdk1_rs2, method='custom', seq_type='aa') + ylab('binom probability') +ggtitle("CDK1")
+p2 <- ggseqlogo(mapk14_rs2, method='custom', seq_type='aa') + ylab('binom probability') +ggtitle("MAPK14")
+p3 <- ggseqlogo(atm_rs2, method='custom', seq_type='aa') + ylab('binom probability') +ggtitle("ATM")
+p4 <- ggseqlogo(plk1_rs2, method='custom', seq_type='aa') + ylab('binom probability') +ggtitle("PLK1")
+
+gridExtra::grid.arrange(p1,p2,p3,p4, ncol =4)
+```
+
+# Calculating the PSSM for everykinase
+
+```{r}
+#Function to geneate PSSM
+calculatePSSM <- function(df, bkg, cutOff = 0.4){
+    #df - Dataframe containing amino acid motifs split into columns by single letter
+    #bkg - backgroud amino acid frequency with disorder prediction cut offs
+    #cutOff - desired disorder cutOff. By default 0.4
+    #Count total number of sequences
+    N = dim(df)[1]
+    #Select backgroud at specific disorder
+    my_bkg <- bkg %>% dplyr::filter(disorder == 0.4)
+    rownames(my_bkg) <- my_bkg$AminoAcid
+    #Generate count matrix 
+    temp <- calcCount(df)
+    #Calculate the log odd probability score
+    pssm_score <- calcBinomProb(temp, N, my_bkg)
+
+    #Return PSSM scores
+    pssm_score
+}
+#What is the problem here???
+calculatePSSM(cdk1[10:30], bkg)
+```
+
+```{r arrange the data for PSSM generation for all the good kinases}
+
+#Select the good kinases 
+good <- good_kinases$enzyme_genesymbol[good_kinases$good == "yes"]
+
+#leave only these kinases in database
+kin <- db %>% 
+              filter(enzyme_genesymbol %in% good) %>% 
+              select(enzyme_genesymbol,A1:A21)
+
+#Splitting the dataframe into nested list by group
+kinList <- split.data.frame(x = kin, f = list(kin$enzyme_genesymbol))
+
+#Removing the enzyme_genesymbol column 
+kinList <- lapply(kinList, function(x) x[-1])
+
+```
+```{r calculating the PSSM scores}
+
+kin_pssm <- pblapply(kinList, calculatePSSM, bkg = bkg) # counting amino acid
+#saveRDS(kin_pssm, "data/kinase_pssm.rds")
+```
+
+
+# THIS SECTION IS NOT IMPORTANT 
+```{r making heatmaps for all the kinases}
+#doing this in for loop because I do not know how to extract titles with lapply.
+kin_HM <- vector(mode = "list", length = length(kin_pssm))
+names(kin_HM) <- names(kin_pssm)
+makeHM <- function(df, my_title){
+   pheatmap(df, display_numbers = T, cluster_cols = F, cluster_rows = F, main = my_title)[[4]]
+}  
+
+for (i in names(kin_pssm)){
+    kin_HM[[i]] <- makeHM(kin_pssm[[i]],i)
+}
+
+```
+
+
+```{r make logos for all positive residues}
+kin_Logo <- vector(mode = "list", length = length(kin_pssm))
+names(kin_Logo) <- names(kin_pssm)
+makeLogo <- function(df, my_title){
+
+    #All values be 3.75 are set to zero for plotting reasons
+    temp <- df
+    temp[temp < 3.75] <- 0
+    ggseqlogo(temp, method='custom', seq_type='aa') + ylab('RS') + ggtitle(my_title)
+}
+
+for (i in names(kin_pssm)){
+    kin_Logo[[i]] <- makeLogo(kin_pssm[[i]],i)
+}
+
+
+```
+
+
+```{r make logos with negative values as well}
+kin_LogoNegative <- vector(mode = "list", length = length(kin_pssm))
+names(kin_LogoNegative) <- names(kin_pssm)
+makeLogoNegative <- function(df, my_title){
+
+    #All values be 3.75 are set to zero for plotting reasons
+    temp <- df
+    temp[temp > -3.75 & temp < 3.75] <- 0
+    ggseqlogo(temp, method='custom', seq_type='aa') + ylab('RS') + ggtitle(my_title)
+}
+
+for (i in names(kin_pssm)){
+    kin_LogoNegative[[i]] <- makeLogoNegative(kin_pssm[[i]],i)
+}
+```
+
+
+```{r saving the plots}
+if (TRUE){
+
+for (i in names(kin_HM)){
+    ggsave(paste(c("pssmPlots/HM/", i ,".png"), collapse = ""), plot =  kin_HM[[i]])
+}
+
+for (i in names(kin_Logo)){
+    ggsave(paste(c("pssmPlots/Logos/", i ,".png"), collapse = ""), plot =  kin_Logo[[i]])
+}
+
+for (i in names(kin_LogoNegative)){
+    ggsave(paste(c("pssmPlots/LogosNegative/", i ,".png"), collapse = ""), plot =  kin_LogoNegative[[i]])
+}
+
+}
+
+
+```

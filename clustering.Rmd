@@ -1,0 +1,385 @@
+---
+title: "Fuzzy clustering of data"
+author: "Valdemaras Petrosius"
+date: "16.06.2021"
+output: 
+    html_document:
+        toc: true
+        theme: united
+---
+```{r}
+#Setting for the notebook. Chucks are excluded unless indicated otherwise
+knitr::opts_chunk$set(knitr::opts_chunk$set(include = FALSE, warning = FALSE, echo = FALSE, fig.width = 14, fig.height = 8))
+set.seed(42)
+```
+
+```{r importing and arranging the data}
+library(tidyverse)
+library(ggprism)
+tt <- readRDS("data/tt.rds");rownames(tt) <- paste("P", 1:dim(tt)[1], sep = "")
+myGroup <- factor(rep(c("min0", "min20", "min40", "min60", "min90"),3), levels = c("min0", "min20", "min40", "min60", "min90"))
+design <- model.matrix(~myGroup + 0, myGroup)
+timeCourseFit <- apply(tt[,10:24], 1, function(x) coefficients(summary(lm(x ~ myGroup + 0))))[1:6,]
+timeCourseDf <- data.frame(min0 = timeCourseFit[1,],
+                           min0 = timeCourseFit[2,],
+                           min0 = timeCourseFit[3,],
+                           min0 = timeCourseFit[4,],
+                           min90 = timeCourseFit[5,],
+                           Er = timeCourseFit[6,])
+```
+
+
+```{r}
+library(Mfuzz)
+
+#first get the time point data together:
+timepoint <- c(1,2,3,4,5)
+# bind that to the dataframe
+test_data2 <- rbind(timepoint,timeCourseDf[1:5])
+row.names(test_data2)[1]<-"time"
+#save it to a temp file so ti doesnt clutter up my blog directory
+tmp <- tempfile()
+write.table(test_data2,file=tmp, sep='\t', quote = F, col.names=NA)
+#read it back in as an expression set
+data <- table2eset(file=tmp)
+
+data.s <- standardise(data)
+```
+
+
+```{r calculating optimal parameters for clustering, include = TRUE, fig.height = 5, fig.width = 5}
+m1 <- mestimate(data.s)
+m1
+#Dmin(data.s, m=m1, crange=seq(2,22,1), repeats=3, visu=TRUE)
+```
+
+# C-means fuzzy clustering
+```{r, include = TRUE}
+c <- mfuzz(data.s,c=8,m=m1)
+myCol <- hcl.colors(n=50, palette = "viridis")
+mfuzz.plot(data.s,cl=c,mfrow=c(3,3),time.labels=c(0,20,40,60,90), new.window = FALSE, colo= myCol)
+```
+
+```{r extracting data from the clustering}
+dataS <- t(apply(timeCourseDf[1:5],1 , function(x) scale(x)))
+dataC <- cbind(dataS, c$membership, c$cluster, rownames(dataS))
+colnames(dataC) <- c("min0", "min20", "min40", "min60", "min90", paste("Cluster", 1:8, sep = ""), "AssignedCluster", "myID")
+```
+
+
+
+# Reploting data in ggplot for nicer cluster figures
+```{r}
+dataC2 <-   tt %>% rownames_to_column("myID") %>% 
+              left_join(as.data.frame(dataC), by = "myID") %>% 
+              dplyr::select(min0:min90, AssignedCluster, myID, Cluster1:Cluster8)
+
+#Tranforming data for ggplot 
+d1 <- dataC2 %>% gather(timePoint,zscore, min0:min90)  %>% 
+              mutate(timePoint = as.numeric(gsub("min", "", timePoint)))
+
+
+#Adjusting so that all clusters start at the same starting value 
+
+d_down <- d1 %>% dplyr::filter(AssignedCluster %in% c(1,4,5,6,8)) %>%
+                group_by(AssignedCluster) %>%
+                mutate( zscore = as.numeric(zscore),
+                        zscoreAdj = zscore - abs(min(zscore)))
+
+d_up <- d1 %>% dplyr::filter(AssignedCluster %in% c(2,7,3,4)) %>%
+                group_by(AssignedCluster) %>%
+                mutate(zscore = as.numeric(zscore),
+                       zscoreAdj = zscore + abs(min(zscore)))
+
+d2 <- as_tibble(rbind(d_up, d_down))
+```
+
+```{r}
+p1 <- ggplot(subset(d2, AssignedCluster == 1), aes(x = timePoint, y = zscoreAdj, color = as.numeric(Cluster1), 
+        alpha = as.numeric(Cluster1), group = rev(reorder(myID, Cluster1)))) +
+        #geom_point(alpha =0.5) +
+        geom_line(size = 0.8) +
+        viridis::scale_color_viridis(option ="G") +
+        theme_prism() +
+        scale_y_continuous(guide = "prism_offset_minor") +
+        scale_x_continuous(guide = "prism_offset_minor") +
+        xlab("Time, min") + ylab("Adjusted Z score") +
+        theme(legend.position ="none") 
+p1
+#ggsave("p1.png", dpi = 300)
+
+p2 <- ggplot(subset(d2, AssignedCluster == 2), aes(x = timePoint, y = zscoreAdj, color = as.numeric(Cluster2), 
+        alpha = as.numeric(Cluster2), group = rev(reorder(myID, Cluster2)))) +
+        #geom_point(alpha =0.5) +
+        geom_line(size = 0.8) +
+        viridis::scale_color_viridis(option ="G") +
+        theme_prism() +
+        scale_y_continuous(guide = "prism_offset_minor") +
+        scale_x_continuous(guide = "prism_offset_minor") +
+        xlab("Time, min") + ylab("Adjusted Z score") +
+        theme(legend.position ="none") 
+p2
+#ggsave("p2.png", dpi = 300)
+p3 <- ggplot(subset(d2, AssignedCluster == 3), aes(x = timePoint, y = zscoreAdj, color = as.numeric(Cluster3), 
+        alpha = as.numeric(Cluster3), group = rev(reorder(myID, Cluster3)))) +
+        #geom_point(alpha =0.5) +
+        geom_line(size = 0.8) +
+        viridis::scale_color_viridis(option ="G") +
+        theme_prism() +
+        scale_y_continuous(guide = "prism_offset_minor") +
+        scale_x_continuous(guide = "prism_offset_minor") +
+        xlab("Time, min") + ylab("Adjusted Z score") +
+        theme(legend.position ="none") 
+p3
+#ggsave("p3.png", dpi = 300)
+p4 <- ggplot(subset(d2, AssignedCluster == 4), aes(x = timePoint, y = zscoreAdj, color = as.numeric(Cluster4), 
+        alpha = as.numeric(Cluster4), group = rev(reorder(myID, Cluster4)))) +
+        #geom_point(alpha =0.5) +
+        geom_line(size = 0.8) +
+        viridis::scale_color_viridis(option ="G") +
+        theme_prism() +
+        scale_y_continuous(guide = "prism_offset_minor") +
+        scale_x_continuous(guide = "prism_offset_minor") +
+        xlab("Time, min") + ylab("Adjusted Z score") +
+        theme(legend.position ="none") 
+
+p4
+#ggsave("p4.png", dpi = 300)
+p5 <- ggplot(subset(d2, AssignedCluster == 5), aes(x = timePoint, y = zscoreAdj, color = as.numeric(Cluster5), 
+        alpha = as.numeric(Cluster5), group = rev(reorder(myID, Cluster5)))) +
+        #geom_point(alpha =0.5) +
+        geom_line(size = 0.8) +
+        viridis::scale_color_viridis(option ="G") +
+        theme_prism() +
+        scale_y_continuous(guide = "prism_offset_minor") +
+        scale_x_continuous(guide = "prism_offset_minor") +
+        xlab("Time, min") + ylab("Adjusted Z score") +
+        theme(legend.position ="none") 
+p5
+#ggsave("p5.png", dpi = 300)
+p6 <- ggplot(subset(d2, AssignedCluster == 6), aes(x = timePoint, y = zscoreAdj, color = as.numeric(Cluster6), 
+        alpha = as.numeric(Cluster6), group = rev(reorder(myID, Cluster6)))) +
+        #geom_point(alpha =0.5) +
+        geom_line(size = 0.8) +
+        viridis::scale_color_viridis(option ="G") +
+        theme_prism() +
+        scale_y_continuous(guide = "prism_offset_minor") +
+        scale_x_continuous(guide = "prism_offset_minor") +
+        xlab("Time, min") + ylab("Adjusted Z score") +
+        theme(legend.position ="none") 
+p6
+#ggsave("p6.png", dpi = 300)
+p7 <- ggplot(subset(d2, AssignedCluster == 7), aes(x = timePoint, y = zscoreAdj, color = as.numeric(Cluster7), 
+        alpha = as.numeric(Cluster7), group = rev(reorder(myID, Cluster7)))) +
+        #geom_point(alpha =0.5) +
+        geom_line(size = 0.8) +
+        viridis::scale_color_viridis(option ="G") +
+        theme_prism() +
+        scale_y_continuous(guide = "prism_offset_minor") +
+        scale_x_continuous(guide = "prism_offset_minor") +
+        xlab("Time, min") + ylab("Adjusted Z score") +
+        theme(legend.position ="none") 
+p7
+#ggsave("p7.png", dpi = 300)
+p8 <- ggplot(subset(d2, AssignedCluster == 8), aes(x = timePoint, y = zscoreAdj, color = as.numeric(Cluster8), 
+        alpha = as.numeric(Cluster8), group = rev(reorder(myID, Cluster8)))) +
+        #geom_point(alpha =0.5) +
+        geom_line(size = 0.8) +
+        viridis::scale_color_viridis(option ="G") +
+        theme_prism() +
+        scale_y_continuous(guide = "prism_offset_minor") +
+        scale_x_continuous(guide = "prism_offset_minor") +
+        xlab("Time, min") + ylab("Adjusted Z score") +
+        theme(legend.position ="none") 
+p8
+#ggsave("p8.png", dpi = 300)
+
+```
+
+# Fitting the slow and fast clusters
+```{r}
+
+#Generate fit data for the cluster to be plotted
+
+d3 <-  d1 %>% dplyr::filter(AssignedCluster %in% c(2,7)) %>%
+                group_by(AssignedCluster, myID) %>%
+                mutate(zscore = as.numeric(zscore),
+                       zscoreAdj = zscore + abs(min(zscore)))
+
+fast <-  subset(d2, AssignedCluster == 2)
+slow <-  subset(d2, AssignedCluster == 7)
+
+
+fast_fit <- nls(zscoreAdj ~ Vm * timePoint/(K+timePoint),start = list(K = 10, Vm = 1), data = fast,  trace = T)
+slow_fit <- nls(zscoreAdj ~ Vm * timePoint/(K+timePoint),start = list(K = 1, Vm = 10), data = slow,  trace = T)
+
+#fast_fit <- minpack.lm::nlsLM(zscore~a/(1 + exp(-b * (timePoint-c))), start=list(a=4,b=.5,c=1), data = fast)
+#slow_fit <- minpack.lm::nlsLM(zscore~a/(1 + exp(-b * (timePoint-c))), start=list(a=4,b=.5,c=1), data = fast)
+#Setting the timepoints
+fit_data <- data.frame(timePoint = seq(0,90,0.2))
+  
+fit_data_fast <- fit_data %>% mutate(zscoreAdj = predict(fast_fit, newdata = fit_data), myID = "fit")
+fit_data_slow <- fit_data %>% mutate(zscoreAdj = predict(slow_fit, newdata= fit_data), myID = "fit")
+
+
+#Extracting coefficients
+coef_fast <- coefficients(summary(fast_fit))
+coef_slow <- coefficients(summary(slow_fit))
+
+#Making labels for plot 
+kf1 <- str_c("K =", round(coef_fast[1,1],2), "+/-", round(coef_fast[1,2],2), sep = " ")
+kf2 <- str_c("Vm =", round(coef_fast[2,1],2), "+/-", round(coef_fast[2,2],2), sep = " ")
+
+ks1 <- str_c("K =", round(coef_slow[1,1],2), "+/-", round(coef_slow[1,2],2), sep = " ")
+ks2 <- str_c("Vm =", round(coef_slow[2,1],2), "+/-", round(coef_slow[2,2],2), sep = " ")
+
+ggplot(fast, aes(x = timePoint, y = zscoreAdj, 
+        #color = as.numeric(Cluster7), alpha = as.numeric(Cluster7), 
+        group = rev(reorder(myID, Cluster7)))) +
+        #geom_point(alpha =0.5) +
+        geom_line(size = 0.8, alpha = 0.01, color ="#579C97") +
+        #viridis::scale_color_viridis(option ="G") +
+        #scale_color_greys() +
+        theme_prism() +
+        xlab("Time, min") + ylab("Stouffer z score") +
+        theme(legend.position ="none") +
+        ylim(c(0,3)) +
+        scale_y_continuous(guide = "prism_offset_minor") +
+        scale_x_continuous(guide = "prism_offset") +
+        #Adding the fit
+        geom_line(data = fit_data_fast, aes(x = timePoint, y = as.numeric(zscoreAdj), group = NA), alpha = 1, color = "#2A6D7A", size = 1.5) +
+        annotate(geom="text", x=64.5, y=0.2, label= kf1,color="#2A6D7A", size = 6) +
+        annotate(geom="text", x=64.5, y=0.7, label= kf2,color="#2A6D7A", size = 6) +
+        scale_x_continuous(breaks = c(0,20,40,60,90))
+#
+
+
+ggplot(slow, aes(x = timePoint, y = zscoreAdj, 
+        #color = as.numeric(Cluster7), alpha = as.numeric(Cluster7), 
+        group = rev(reorder(myID, Cluster7)))) +
+        geom_line(size = 0.8, alpha = 0.01, color ="#579C97") +
+        #viridis::scale_color_viridis(option ="G") +
+        theme_prism() +
+        xlab("Time, min") + ylab("Stouffer z score") +
+        theme(legend.position ="none") +
+        ylim(c(0,6)) +
+        scale_y_continuous(guide = "prism_offset_minor") +
+        #Adding the fit
+        geom_line(data = fit_data_slow, aes(x = timePoint, y = zscoreAdj, group = NA), color = "#2A6D7A", size = 2) +
+        #geom_line(data = fit_data_fast, aes(x = timePoint, y = zscore), color = "grey", linetype = "dashed", size = 2) +
+        annotate(geom="text", x=64.5, y=0.2, label= ks1,color="#2A6D7A", size = 6) +
+        annotate(geom="text", x=63., y=0.7, label= ks2,color="#2A6D7A", size = 6) +
+        scale_x_continuous(breaks = c(0,20,40,60,90))
+
+```
+
+
+# Fitting some examples sites from slow and fast clusters 
+
+```{r}
+#recalculating the data as I am too lazy to change the variable names
+data <- t(apply(tt[10:24], 1, scale)) %>% as.data.frame() 
+#Gather the data
+data_stats2 <- data %>% rownames_to_column("ID") %>% 
+                    gather(timePoint, zscore, V1:V15) 
+
+#Renaming the V variables to minutes
+data_stats2$timePoint[data_stats2$timePoint %in% c("V1", "V6", "V11")] <- "0min"
+data_stats2$timePoint[data_stats2$timePoint %in% c("V2", "V7", "V12")] <- "20min"
+data_stats2$timePoint[data_stats2$timePoint %in% c("V3", "V8", "V13")] <- "40min"
+data_stats2$timePoint[data_stats2$timePoint %in% c("V4", "V9", "V14")] <- "60min"
+data_stats2$timePoint[data_stats2$timePoint %in% c("V5", "V10", "V15")] <- "90min"
+
+
+tt_temp <- tt %>% rownames_to_column("ID")
+
+data_stats3 <- data_stats2 %>% 
+                    ungroup() %>% 
+                    left_join(tt_temp %>% select(GeneName, MasterMod, GeneMod, ID), by = "ID") %>% 
+                    group_by(GeneMod) %>%
+                    mutate(zscore = zscore + abs(min(zscore)))
+
+
+
+data_stats2 <- data_stats2 %>% group_by(ID, timePoint) %>%
+                    summarise(zscore.comb = sum(zscore)/3,
+                              zscore.std = sd(zscore)) 
+
+#cluster_data2 <-left_join(data_stats2,temp_tt, by = "ID") %>%
+#                        group_by(GeneMod) %>%
+#                mutate(zscore.comb = zscore.comb + abs(min(zscore.comb)))
+#
+
+#Selecting site with larest logFC at 20min for fast cluster and largest logFC at 90min for slow 
+
+
+rif1 <- data_stats3 %>% filter(GeneMod == "RIF1:S2260;S2263") %>% 
+                        mutate(timePoint = as.numeric(gsub("min", "", timePoint)))
+
+kif20a <- data_stats3 %>% filter(GeneMod == "KIF20A:T857;S867") %>% 
+                        mutate(timePoint = as.numeric(gsub("min", "", timePoint)))
+
+
+rif1_fit <- nls(zscore ~ Vm * timePoint/(K+timePoint),start = list(K = 1, Vm = 1),    
+                data = rif1,  trace = T)
+
+kif20a_fit <- nls(zscore ~ Vm * timePoint/(K+timePoint),start = list(K = 10, Vm = 1),    
+                data = kif20a,  trace = T)
+```
+
+```{r}
+#Plotting the fits 
+
+fit_data_rif1 <- data.frame(timePoint = seq(0,90,0.2), Rep = "fit")
+fit_data_rif1 <- fit_data_rif1 %>% mutate(zscore = predict(rif1_fit, newdata = fit_data_rif1), ID = "fit")
+
+
+fit_data_mkif20a <- data.frame(timePoint = seq(0,90,0.2), Rep = "fit")
+fit_data_mkif20a <- fit_data_mkif20a %>% mutate(zscore = predict(mkif20a_fit, newdata = fit_data_mkif20a), ID = "fit")
+
+
+#Extracting coefficients
+coefs_rif1 <- coefficients(summary(rif1_fit))
+
+coefs_kif20a <- coefficients(summary(kif20a_fit))
+#Making labels for plot 
+
+kf1_1 <- str_c("K =", round(coefs_rif1[1,1],2), "+/-", round(coefs_rif1[1,2],2), sep = " ")
+kf2_1 <- str_c("Vm =", round(coefs_rif1[2,1],2), "+/-", round(coefs_rif1[2,2],2), sep = " ")
+
+kf1_2 <- str_c("K =", round(coefs_kif20a[1,1],2), "+/-", round(coefs_kf20a[1,2],2), sep = " ")
+kf2_2 <- str_c("Vm =", round(coefs_kif20a[2,1],2), "+/-", round(coefs_kf20a[2,2],2), sep = " ")
+
+
+rif1$Rep = c(rep("Rep1",5), rep("Rep2",5), rep("Rep3", 5))
+kif20a$Rep = c(rep("Rep1",5), rep("Rep2",5), rep("Rep3", 5))
+#Ploting rif1 
+ggplot(rif1, aes(x = timePoint, y = zscore,group = Rep)) +
+        #geom_linerange(size = 1.5) +
+        geom_point(size = 2, color = "grey20") +
+        geom_line(size = 1, alpha = 0.2, color = "grey60") +
+        theme_prism() +
+        scale_y_continuous(guide = "prism_offset") + 
+
+        geom_line(data = fit_data_rif1, aes(x = timePoint, y = zscore), size = 1.5, color = hcl.colors(n=5, "viridis")[1]) +
+        theme(legend.title = element_blank(), legend.position = "none") +
+        xlab("Time, min") + ylab("Z-score") + 
+        scale_x_continuous(breaks = c(0,20,40,60,90)) 
+
+        #annotate(geom="text", x=70, y=0.7, label= kf1_1,color=hcl.colors(n=5, "Darkmint")[2], size = 6) +
+        #annotate(geom="text", x=70, y=1.25, label= kf2_1,color=hcl.colors(n=5, "Darkmint")[2], size = 6)
+
+
+
+ggplot(kif20a, aes(x = timePoint, y = zscore,group = Rep)) +
+        #geom_linerange(size = 1.5) +
+        geom_point(size = 2, color = "grey20") +
+        geom_line(size = 1, alpha = 0.2, color = "grey60") +
+        theme_prism() +
+        scale_y_continuous(guide = "prism_offset") + 
+
+        geom_line(data = fit_data_kif20a, aes(x = timePoint, y = zscore), size = 1.5, linetype = "dashed", color = hcl.colors(n=5, "viridis")[3]) +
+        theme(legend.title = element_blank(), legend.position = "none") +
+        xlab("Time, min") + ylab("Z-score") + 
+        scale_x_continuous(breaks = c(0,20,40,60,90))
+```

@@ -1,0 +1,455 @@
+---
+title: "Scoring of phosphorylation sites based on PSSM"
+author: "Valdemaras Petrosius"
+date: "12.08.2021"
+output: 
+    html_document:
+        toc: true
+        theme: united
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  comment = "##", include = FALSE
+)
+```
+
+```{r data}
+set.seed(42)
+library(tidyverse)
+library(pbapply)
+source("myScripts/motifData.R")
+
+db <- ptms %>% filter(curation_effort > 2) 
+good_kinases <- db %>% count(enzyme_genesymbol) %>% arrange(-n) %>% mutate(good = ifelse(n > 20, "yes", "no"))
+db <- db %>% filter(enzyme_genesymbol %in% good_kinases$enzyme_genesymbol[good_kinases$good == "yes"])
+
+db$ID <- paste(db$residue_type, db$residue_offset, sep = "")
+db$ID <- paste(db$substrate_genesymbol, db$ID, sep = ":")
+db$ID <- paste(db$ID, db$enzyme_genesymbol, sep = "-")
+pssm <- readRDS("data/kinase_pssm.rds")
+#Make a unique ID for the rows
+```
+
+```{r generating indexing matrix and calculating scores}
+
+#The indexing matrices can be used to calculate the kinase specific score more faster from the PSSM faster.
+
+sites <- db %>% select(ID, A1:A21) %>% na.omit()
+sites.split <- split(sites, f = sites$ID)
+#Convert dataframe into list of vectors 
+sites.split <- lapply(sites.split,function(x) as.character(x[-1]))
+
+#Generates indexing matrix based on one motif. Used with the wrapper function below.
+generateMatrix <- function(x,m,motifLength = 21){
+    #clone input
+    m2 <- m
+    #loop the matching.Finds the row that corespons to the amino acid at a specific position  in the motif in the indexing matrix 
+    #Changes it from FALSE to TRUE in that specific position (i)
+    for (i in 1:motifLength){
+    m2[rownames(m2) == x[i],i] <- TRUE
+    }
+    #Returns the data
+    m2
+}
+
+#Wrapper function to generate indexing matrix for a list of motifs
+indexingMatrix <- function(df, cols = 21, rows = 20){
+
+    temp <- df
+    #Creating empty matrix
+    m <-matrix(FALSE, ncol = cols, nrow = rows)
+    rownames(m) <- c("A", "R", "N", "D", "C", "Q", "E", "G", "H", "I", "L", "K", "M", "F", "P", "S", "T", "W", "Y", "V")
+    colnames(m) <- paste("A", 1:cols, sep = "")
+
+    #Generating the indexing matrices
+    temp <- lapply(temp, generateMatrix, m = m)
+    #Return data
+    temp
+}
+
+motif_index <- indexingMatrix(sites.split)
+
+#Function for calculating the score for a single motif
+punchCard <- function(motifs, pssm){
+
+    sum(pssm[motifs])
+}
+
+
+#Apply function for one motif to all the pssms
+calcScore <- function(mat, pssm){
+        unlist(lapply(mat, punchCard, pssm = pssm))
+} 
+
+#Apply the function to score all the motifs
+motif_scores <- pblapply(pssm, calcScore, mat = motif_index)
+names(motif_scores)
+```
+
+```{r saving scores}
+score_df <- as.data.frame(t((do.call(rbind, motif_scores))))
+#saveRDS(score_df, "data/db_pssm_scores.rds")
+```
+
+```{r quick sanity check to see if the scores cluster based on kinase}
+library(corrplot)
+M <- cor(score_df[,-78])
+M2 <- M[grepl("CDK|MAPK",colnames(M)),grepl("CDK|MAPK",colnames(M))]
+
+
+corrplot(M, method = "color", type = "full", order="hclust", 
+            col = rev(hcl.colors(n =100, palette = "RdBu")),
+            tl.cex = 0.6, tl.col = 'black', addrect = 12)
+```
+
+```{r check CDK scores are distrbuted grouped by the known kinases}
+#Expecting mapk kinase to also score high 
+score_df$Kinase <- str_extract(rownames(score_df), "-.*")
+score_df$Kinase <- gsub("-", "", score_df$Kinase)
+
+ggplot(score_df, aes(x = Kinase, y = CDK1)) + 
+    geom_boxplot() +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, size = 10))
+    
+```
+
+```{r merging scores to tt}
+score_df <- score_df %>% 
+            rownames_to_column("ID")
+
+#Find the top scores 
+top_scores <-  as.data.frame(t(apply(score_df[-c(1,63)],1, function(x) sort(x,decreasing = TRUE)[1:3])))   #-1 because the first row contains IDs
+colnames(top_scores) <- paste("KinaseScore", 1:3, sep = "")
+
+#Find top scoring kinase names
+top_kinases <- list()
+for (i in 1:dim(score_df)[1]){
+    temp <- colnames(score_df[i, score_df[i,] %in% top_scores[i,]])
+    top_kinases[[i]] <- temp
+}
+names(top_kinases) <- score_df$ID
+top_kinases <- as.data.frame((do.call(rbind, top_kinases)))[1:3]
+colnames(top_kinases) <- paste("Kinase", 1:3, sep = "")
+#Calculate the runned up score difference 
+top_scores$dif2 <- top_scores$KinaseScore1 - top_scores$KinaseScore2
+top_scores$dif3 <- top_scores$KinaseScore1 - top_scores$KinaseScore3
+
+#Combine the data
+topKinase <- cbind(top_scores,top_kinases)
+
+score_df <- cbind(score_df, topKinase)
+```
+
+
+# LOGISTIC REGRESSION
+
+```{r}
+require(caret)
+require(data.table)
+
+
+
+df2 <- score_df[1:63]
+#Spliting the data set for training and testing
+my_index <- createDataPartition(df2$Kinase, p = 0.8, list = F)
+
+df_train <- df2[my_index,]
+df_test <- df2[-my_index,]
+
+```
+
+# Single model 
+```{r}
+
+if (TRUE){
+#Runs logistic regression on the kinase specific  PSSM scores for each kinase
+
+#Function to apply logistic regression and append the probabilities to the dataframe 
+logisticReg <- function(df){
+    #df1 output from selectKinase function 
+
+    #Generate downsampled dataset. Match the number of positive and negative instances
+    d <- downSample(df[-3], y = df$Class)
+
+    #Make formula
+    my_formula <- as.formula(paste("Class ~", colnames(d)[2]))
+
+    #Perform fit
+    glm.fit <- glm(my_formula,family=binomial,data=d, control = list(maxit = 1000))
+
+    #SAVE JUST THE FIT RIGHT NOW
+    #Predict probabilities
+    #Prob <- predict(glm.fit, type = "response", newdata = df[2])
+
+    #Store output
+    #out <- cbind(df, Prob)
+
+    glm.fit
+
+}
+
+
+#Function to sample the data for n number of times 
+selectKinase <- function(df, i){
+    # df - full dataset with calculated PSSM scores for each kinase  in columns and the specific site sites in rows 
+    # specific column names need. ID column contains indentifiers. Kinase contains the annotated kinase for that site
+    # i - index for selecting the specific kinase column
+    # 
+    
+    temp <- data.frame(ID = df$ID, 
+                       Scores = df[i],
+                       Class = factor(ifelse(df$Kinase == as.character(i), "yes", "no")))
+    
+    temp
+}
+
+scoreToProbFits <- function(i, df, N){
+
+    #Select kinase
+    temp <- selectKinase(df,i)
+
+    #Generate empty list for storing the probabilities
+    fits <- replicate(N, logisticReg(temp), simplify = F)
+
+    fits
+}
+
+
+kinases <- names(df2[2:62])
+
+#well...for loop it is...
+kinaseFits <- list()
+for (j in kinases){
+    kinaseFits[[j]] <- scoreToProbFits(j, df_train, N = 50) # set number of models to generate
+    print(j)
+}
+
+
+#Calculate probabilities
+predictProb <- function(data, models){
+    #Predicts probability that the site is a specific kinase site based on kinase specific logistic regression models 
+    #generate as binary problems in a one vs all manner.
+    #data - a dataframe containing the kinase specific PSSM scores in columns and sites in rows. First columns contains IDs for the sites
+    #models - a nested list containing the pretrained models
+
+    ## cloning inpy  
+    temp <- data
+    models <- models
+    kinases <- names(models)
+
+    #loop the calculation because I do not know how to do this with an apply function. I should really figure it out...
+    kinase_avg <- list()
+    kinase_std <- list()
+    j = 2
+    #The names of the kinases are in the same order as the columns
+    for (i in kinases){
+       #Calculating the probability from all the models 
+       temp_prob <- predict(models[[i]], type = "response", newdata = temp[j])
+       #Converting to dataframe
+       temp_prob <- as.data.frame(do.call(cbind, temp_prob)) 
+       #Adding the mean probability to list
+       kinase_avg[[i]] <- apply(temp_prob,1,mean)
+       #Adding the standart deviation to the list
+       kinase_std[[i]] <- apply(temp_prob,1,sd)
+       j = j + 1 # omits the first row that contains IDs and moves the newdata column for the next iteration.
+       print(paste("Current kinase:", i, sep = " "))
+    }
+
+    #convert nested list to scores 
+    kinase_avg <- as.data.frame(do.call(cbind, kinase_avg)) 
+    kinase_std <- as.data.frame(do.call(cbind, kinase_std))
+    #rename the standart deviation columns
+    colnames(kinase_std) <- paste(colnames(kinase_avg), "std", sep = "_")
+
+    #Bind dataframes and return
+    cbind(kinase_avg, kinase_std)
+}
+
+
+prob_df <- predictProb(df_test[-63], kinaseFits)
+#Add kinase 
+k1 <- str_extract(rownames(prob_df), "-.*")
+k2 <- gsub("-", "", k1)
+prob_df$Kinase <- k2
+
+}
+
+#saveRDS(kinaseFits,"data/kinaseModels.rds")
+```
+
+
+# Full model
+
+```{r}
+#Runs logistic regression on the full PSSM scores for each kinase. ROC SCORE OF ONLY 0.78 COMPARE TO 0.94 with single model.
+if (FALSE) {
+#Function to apply logistic regression and append the probabilities to the dataframe 
+logisticRegFull <- function(df){
+    #df1 output from selectKinase function 
+    #the class variable has to be in the last column
+    #Generate downsampled dataset. Match the number of positive and negative instances
+    d <- downSample(df[-length(df)], y = df$Class)
+
+
+    #Perform fit
+    glm.fit <- glm(Class ~ .,family=binomial,data=d[-1], control = list(maxit = 1000))
+
+    #SAVE JUST THE FIT RIGHT NOW
+    #Predict probabilities
+    #Prob <- predict(glm.fit, type = "response", newdata = df[2])
+
+    #Store output
+    #out <- cbind(df, Prob)
+
+    glm.fit
+
+}
+
+
+#Function to sample the data for n number of times 
+selectKinaseFull <- function(df, i){
+    # df - full dataset with calculated PSSM scores for each kinase  in columns and the specific site sites in rows 
+    # specific column names need. ID column contains indentifiers. Kinase contains the annotated kinase for that site
+    # i - index for selecting the specific kinase column
+    
+    temp <- cbind(df[,sapply(df,class) == "numeric"], Class = factor(ifelse(df$Kinase == as.character(i), "yes", "no")))
+    temp <- cbind(df$ID, temp)
+    temp
+}
+
+
+
+scoreToProbFitsFull <- function(i, df, N){
+
+    #Select kinase
+    temp <- selectKinaseFull(df,i)
+
+    #Generate empty list for storing the probabilities
+    fits <- replicate(N, logisticRegFull(temp), simplify = F)
+
+    fits
+}
+
+
+kinases <- names(df2[2:62])
+
+#well...for loop it is...
+kinaseFits <- list()
+for (j in kinases){
+    kinaseFits[[j]] <- scoreToProbFitsFull(j, df_train, N = 10)
+    print(j)
+}
+
+
+#Calculate probabilities
+
+predictProbFull <- function(data, models){
+    #Predicts probability that the site is a specific kinase site based on kinase specific logistic regression models 
+    #generate as binary problems in a one vs all manner.
+    #data - a dataframe containing the kinase specific PSSM scores in columns and sites in rows. First columns contains IDs for the sites
+    #models - a nested list containing the pretrained models
+
+    ## cloning inpy  
+    models <- models
+    kinases <- names(models)
+
+    #loop the calculation because I do not know how to do this with an apply function. I should really figure it out...
+    kinase_avg <- list()
+    kinase_std <- list()
+    for (i in kinases){
+       
+       #Calculating the probability for the new data from all the models 
+       temp_prob <- predict(models[[i]], type = "response", newdata = df_test[sapply(df_test,class) == "numeric"]) 
+       #Converting to dataframe
+       temp_prob <- as.data.frame(do.call(cbind, temp_prob)) 
+       #Adding the mean probability to list
+       kinase_avg[[i]] <- apply(temp_prob,1,mean)
+       #Adding the standart deviation to the list
+       kinase_std[[i]] <- apply(temp_prob,1,sd)
+       # Print progress
+       print(paste("Current kinase:", i, sep = " "))
+    }
+
+    #convert nested list to scores 
+    kinase_avg <- as.data.frame(do.call(cbind, kinase_avg)) 
+    kinase_std <- as.data.frame(do.call(cbind, kinase_std))
+    #rename the standart deviation columns
+    colnames(kinase_std) <- paste(colnames(kinase_avg), "std", sep = "_")
+
+    #Bind dataframes and return
+    cbind(kinase_avg, kinase_std)
+}
+
+
+prob_df <- predictProbFull(df_test, kinaseFits)
+#Add kinase 
+k1 <- str_extract(rownames(prob_df), "-.*")
+k2 <- gsub("-", "", k1)
+prob_df$Kinase <- k2
+
+}
+
+```
+
+
+```{r probability correlation plot}
+M <- cor(prob_df[1:61])
+corrplot(M, method = "color", type = "full", order="hclust", 
+            col = rev(hcl.colors(n =100, palette = "RdBu")),
+            tl.cex = 0.6, tl.col = 'black', addrect = 12)
+
+```
+# Make some roc curves for specific kinases. 
+
+```{r single roc}
+t1 <- data.frame(ID = rownames(prob_df),
+                 prob = prob_df$CDK5,
+                 Class = factor(ifelse(prob_df$Kinase == "CDK1", "yes", "no")))
+
+t1_d <-  downSample(t1[-3], y = t1$Class)
+
+library(pROC)
+
+par(pty = "s")
+rc <- roc(t1$Class, t1$prob, plot = TRUE, legacy.axes = TRUE,
+    xlab = "FPR", ylab = "TPR", col = hcl.colors(10, "viridis")[5], lwd = 6, print.auc = TRUE, text.cex = 40, 
+    print.thres = "best", best.method = "closest.topleft")
+
+#Look pretty good, but is probably overfitting the training data 
+```
+
+```{r multiclass roc}
+t2 <- prob_df[c(1:61,123)]
+t2 <- t2 %>% filter(!grepl("\\:", Kinase))
+t2$Kinase <- factor(t2$Kinase)
+mrc <- multiclass.roc(Kinase ~., data = t2, col = "#00214E", xlab = "FPR", ylab = "TPR")
+```
+
+# some plot for the method description 
+```{r}
+temp <- data.frame(ID = rownames(prob_df), 
+                       Scores = prob_df$CDK1,
+                       Class = factor(ifelse(prob_df$Kinase == as.character("CDK1"), "yes", "no"))) %>% 
+                    left_join(score_df[c("ID", "CDK1")], by = "ID")
+
+
+d2  <- d %>% mutate(porb= predict(glm.fit, type = "response"))
+
+
+coefs <- coefficients(glm.fit)
+
+d3 <- sweep(d2[-c(1,63,64)],2,STATS = coefs[-1], FUN = "*" )
+d2$X <- apply(d3,1, sum)
+
+temp_d <- downSample(temp[-3], y = temp$Class)
+ggplot(temp_d, aes(x = CDK1, y = Scores, color = Class)) + 
+    geom_line(color = "grey") +
+    geom_point(size = 3) + theme_bw()  + 
+    scale_color_manual(values = hcl.colors(n =3, palette = "viridis")) +
+    theme(legend.position = "None")
+
+```
+
+

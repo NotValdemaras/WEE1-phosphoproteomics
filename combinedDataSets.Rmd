@@ -1,0 +1,396 @@
+---
+title: "Combined analysis of ExpH and ExpV"
+author: "Valdemaras Petrosius"
+date: "29.09.2021"
+output: 
+    html_document:
+        toc: true
+        theme: united
+---
+
+```{r loading data}
+library(tidyverse)
+library(ggrepel)
+library(ggpubr)
+library(ggprism)
+library(RColorBrewer)
+expH <- readRDS("data/tt_rankKinase_expH.rds")
+expV <- readRDS("data/tt_kinaseRank.rds")
+```
+
+
+```{r combine data into one dataframe}
+#Get list of detected modification and Accesions 
+site_list <- rbind(expH[c("Accession","GeneName", "GeneMod", "MasterMod")],
+                   expV[c("Accession","GeneName", "GeneMod", "MasterMod")]) %>% distinct()
+
+#Attach the time course data to sites
+temp_expV <- expV %>% dplyr::select(-enzyme_genesymbol, -curation_effort, -ID) %>% distinct() 
+data <- left_join(site_list, temp_expV, by = c("Accession","GeneName", "GeneMod", "MasterMod"))
+
+#Attach the single time point
+temp_expH <- expH %>% dplyr::select("Accession","GeneName", "GeneMod", "MasterMod", "logFC", "FDR", "CDK1", "CDK2") %>% distinct()
+toMergeOn <- colnames(temp_expH[colnames(temp_expH) %in% colnames(data)])
+data2 <- left_join(data, temp_expH, by = c("Accession","GeneName", "GeneMod", "MasterMod"))
+
+#Manual adjusting the CDK T loop phosphorylation label 
+data2$GeneName[data2$Accession == "P24941; P06493; Q00526"] <- "CDK1/2/3"
+data2$GeneMod[data2$Accession == "P24941; P06493; Q00526"] <- "CDK1/2/3:T14;Y15"
+```
+
+
+```{r}
+#Make columns for merged logFC and p-val for the 90min time point
+phos <- data2 %>% select(Accession,GeneName,GeneMod, logFC_90min, logFC, FDR_90min, FDR) %>% distinct()
+
+phos$inBoth <- "single_timepoint" # detected in single-timepoint
+phos$inBoth[!(is.na(phos$logFC_90)) & !(is.na(phos$logFC))] <- "Both" # in both
+phos$inBoth[!(is.na(phos$logFC_90)) & is.na(phos$logFC)] <- "time-course" # in time-course 
+
+#Combine FDR and logFC for the 90min time point
+A <- phos %>% filter(inBoth == "Both") %>% 
+                mutate(logFC_avg = (logFC+logFC_90min)/2,
+                        FDR_avg = (FDR + FDR_90min)/2)
+B <- phos %>% filter(inBoth == "single_timepoint") %>% 
+                mutate(logFC_avg = logFC,
+                        FDR_avg = FDR)
+
+C <- phos %>% filter(inBoth == "time-course") %>% 
+                mutate(logFC_avg = logFC_90min,
+                        FDR_avg = FDR_90min)
+volc <- bind_rows(list(A,B,C))
+
+```
+
+```{r}
+volc2 <- subset(volc, !is.na(GeneName))
+ggplot(volc2, aes(x = logFC_avg, y = -log10(FDR_avg), shape = inBoth, label = GeneMod)) +
+        geom_point(alpha =0.5) +
+        geom_text_repel(data = subset(volc2, logFC_avg > 2 & -log10(FDR_avg) > 7.4), color = "#611300") +
+        geom_text_repel(data = subset(volc2, logFC_avg < -0.8 & -log10(FDR_avg) > 7.), color = "#003560") +
+        geom_point(data = subset(volc2, -log10(FDR_avg) > 7.4 & logFC_avg > 2), color = "#611300") +
+        geom_point(data = subset(volc2, -log10(FDR_avg) > 7. & logFC_avg < -0.8), color = "#003560") +
+        theme_bw() + 
+        labs_pubr() +
+        xlab("logFC")  + ylab("-log10(FDR)") + 
+        theme(legend.position = c(0.8,0.2), legend.text = element_text(size = 14), legend.title = element_text(size = 16)) + 
+        guides(shape=guide_legend(title="Detected")) 
+
+```
+
+```{r}
+#Get DNA repair and replication genes 
+
+#Generate human annotation 
+require(biomaRt)
+ensembl <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl")
+
+#DNA repair genes
+repair <- getBM(attributes = c("hgnc_symbol"),
+               filters = "go",
+               values = c("GO:0006281"),
+               mart = ensembl)
+
+#DNA replication genes
+replication <- getBM(attributes = c("hgnc_symbol"),
+               filters = "go",
+               values = c("GO:0006260"),
+               mart = ensembl)
+
+```
+
+# Create circular dendogram 
+
+```{r}
+# Libraries
+library(ggraph)
+library(igraph)
+library(tidyverse)
+library(RColorBrewer) 
+
+#Formating the repair factor data for circular dendogram plot 
+
+#Count the modifications per DNA repair gene and filter the top 
+r3 <- volc %>% filter(GeneName %in% replication$hgnc_symbol, FDR_avg < 0.01) %>%
+                             mutate(Kinase = "WEE1i") %>%
+                             dplyr::select(GeneName) %>% count(GeneName) %>% 
+                             arrange(-n) %>% head(15)
+
+#Get all repair genes and connect them to WEE1
+repair_genes <- volc %>% filter(GeneName %in% r3$GeneName, FDR_avg < 0.01) %>%
+                             mutate(Kinase = "WEE1i") %>% 
+                            dplyr::select(Kinase, GeneName)  %>%
+                            distinct() %>% 
+                            arrange(GeneName); colnames(repair_genes) <- c("from", "to")
+
+#repair_gene_values <- volc %>% filter(GeneName %in% r3$GeneName, FDR_avg < 0.01) 
+
+
+#Get all the modifications for these genes 
+repair_mods <- volc %>% filter(GeneName %in% r3$GeneName, FDR_avg < 0.01) %>%
+                             mutate(Kinase = "WEE1i") %>% 
+                             dplyr::select(GeneName, GeneMod) %>% 
+                             arrange(GeneName);colnames(repair_mods) <- c("from", "to")
+
+repair_mod_values <- volc %>% filter(GeneName %in% r3$GeneName, FDR_avg < 0.01) %>%
+                             arrange(GeneName) %>% 
+                             pull(logFC_avg)
+
+
+repair_edges <- rbind(repair_genes,repair_mods)
+
+#Adding edge groups and manually fixing the first one so the are the same color as the sites
+repair_edges$edge_group <- repair_edges$from;repair_edges$edge_group[1:15] <- repair_edges$to[1:15]
+#Adding logFC as edge weights
+repair_edges$edge_weight <- c(rep(0.1,15), repair_mod_values)
+repair_edges$edge_weight[1:15] <- repair_edges %>% group_by(edge_group) %>% summarise(value = max(edge_weight)) %>% pull(value)
+
+#Make vertices data frame
+repair_vertices <- data.frame(
+                name = unique(c(as.character(repair_edges$from), as.character(repair_edges$to))),
+                value = c(rep(0,16), repair_mod_values)
+)
+
+
+#Add gene names as groups for coloring 
+repair_vertices$group = repair_edges$from[match(repair_vertices$name, repair_edges$to)]
+
+
+#Let's add information concerning the label we are going to add: angle, horizontal adjustement and potential flip
+#calculate the ANGLE of the labels
+repair_vertices$id=NA
+myleaves=which(is.na(match(repair_vertices$name, repair_edges$from)))
+nleaves=length(myleaves)
+repair_vertices$id[ myleaves ] = seq(1:nleaves)
+repair_vertices$angle= 68 - 360 * repair_vertices$id / nleaves
+
+ 
+# calculate the alignment of labels: right or left
+# If I am on the left part of the plot, my labels have currently an angle < -90
+repair_vertices$hjust<-ifelse( repair_vertices$angle < -90, 0, 1)
+ 
+# flip angle BY to make them readable
+repair_vertices$angle<-ifelse(repair_vertices$angle < -90, repair_vertices$angle+180, repair_vertices$angle)
+
+#Remove the gene name from the modification label 
+repair_vertices$label <- gsub(".*:","", repair_vertices$name)
+# Create a graph object
+repair_graph <- graph_from_data_frame(repair_edges %>% arrange(to), vertices=repair_vertices)
+
+
+myColor <- c(hcl.colors(20, "Grays")[1:5], hcl.colors(15, "viridis")[4], 
+                hcl.colors(20, "Grays")[6:10], hcl.colors(15, "viridis")[5], 
+                hcl.colors(20, "Grays")[11], hcl.colors(15, "viridis")[6],
+                hcl.colors(20, "Grays")[12])
+
+myColor2 <- c(hcl.colors(22, "Grays")[1:15]); myColor2[c(10,12)] <- hcl.colors(15, "viridis")[5:6]
+
+ggraph(repair_graph, layout = 'dendrogram', circular = TRUE) + 
+  geom_edge_diagonal(color = "grey95",width = 1) +
+  scale_edge_color_manual(values= myColor2) +
+  geom_node_text(aes(x = x*1.15, y=y*1.15, filter = leaf, label=name, angle = angle, hjust=hjust, colour=group), size=2.7, alpha=1) +
+  geom_node_point(aes(filter = leaf, x = x*1.07, y=y*1.07, colour=group, size=value, alpha=1)) +
+  scale_colour_manual(values= myColor2) +
+  scale_size_continuous( range = c(0.1,10) ) +
+  theme_void() +
+  theme(
+    legend.position="bottom",
+    plot.margin=unit(c(0,0,0,0),"cm"),
+  ) +
+  expand_limits(x = c(-1.3, 1.3), y = c(-1.3, 1.3)) + 
+  annotate(geom="text", x=0, y=0, label="DNA replication",
+              color="black", size = 6)
+```
+
+# Detection summary
+
+```{r}
+a_tc <- volc %>% dplyr::filter(!grepl(";", Accession), inBoth == "time-course" | inBoth == "Both") %>% 
+                dplyr::select(Accession) %>% distinct(); a_tc <- dim(a_tc)[1] # total number of phosphoproteins
+b_tc <- volc %>% dplyr::filter(inBoth == "time-course" | inBoth == "Both") %>% 
+                dplyr::select(GeneMod) %>% distinct(); b_tc <- dim(b_tc)[1] # phosphopeptides
+c_tc <- volc %>%  dplyr::filter(inBoth == "time-course" | inBoth == "Both") %>% 
+                dplyr::select(GeneMod) %>% separate_rows(sep = ";",GeneMod); c_tc <- dim(c_tc)[1] # Phosphosites
+
+
+a_t <- volc %>% dplyr::filter(!grepl(";", Accession)) %>% 
+                dplyr::select(Accession) %>% distinct(); a_t <- dim(a_t)[1] # total number of phosphoproteins
+b_t <- volc %>% 
+                dplyr::select(GeneMod) %>% distinct(); b_t <- dim(b_t)[1] # phosphopeptides
+c_t <- volc %>%  
+                dplyr::select(GeneName, GeneMod) %>% 
+                mutate(mod = gsub(":", "", str_extract(pattern = ":.*", GeneMod))) %>%
+                separate_rows(sep = ";",mod) %>% 
+                mutate(MasterMod = paste(GeneName, mod, sep = ":")) %>% 
+                dplyr::select(MasterMod) %>% 
+                distinct(); c_t <- dim(c_t)[1] # Phosphosites
+
+a_st <- volc %>% dplyr::filter(!grepl(";", Accession), inBoth == "single_timepoint" | inBoth == "Both") %>% 
+                dplyr::select(Accession) %>% distinct(); a_st <- dim(a_st)[1] # total number of phosphoproteins
+b_st <- volc %>% dplyr::filter(inBoth == "single_timepoint" | inBoth == "Both") %>% 
+                dplyr::select(GeneMod) %>% distinct(); b_st <- dim(b_st)[1] # phosphopeptides
+c_st <- volc %>%  dplyr::filter(inBoth == "single_timepoint" | inBoth == "Both") %>% 
+                dplyr::select(GeneMod) %>% separate_rows(sep = ";",GeneMod); c_st <- dim(c_st)[1] # Phosphosites
+
+
+
+detection <- data.frame(type = factor(rep(c("Phosphoprotein", "Phosphopeptide", "Phosphosite"),3), 
+                        levels = rev(c("Phosphoprotein", "Phosphopeptide", "Phosphosite"))),
+                        dataset = c(rep("Time-course", 3), rep("Single timepoint",3), rep("Total",3)),
+                        nums = c(a_tc, b_tc, c_tc, a_st, b_st, c_st, a_t, b_t, c_t))
+
+ggplot(detection, aes(x = type, y = nums, label = nums, fill =dataset)) + 
+                geom_bar(stat = "identity") +
+                geom_label(fill = "white", hjust = 0.8) +
+                theme_prism() +
+                facet_grid(row = vars(dataset)) +
+                scale_y_continuous(guide = "prism_offset") + 
+                xlab("") + ylab("Detected") + 
+                theme(aspect.ratio = 1/3, legend.position = "none") +
+                coord_flip() + 
+                scale_fill_manual(values = hcl.colors(8, "RdBu")[c(6,7,8)]) + 
+                labs_pubr()
+
+                
+```
+
+```{r}
+temp_expV2 <- temp_expV %>% filter(!duplicated(GeneMod))
+ggplot(temp_expV2, aes(x = logFC_20min, y = -log10(FDR_20min), label = GeneMod)) +
+        geom_point(alpha =0.5) +
+        geom_label_repel(data = subset(temp_expV2, logFC_20min > 1 & -log10(FDR_20min) > 5.5), color = "#611300",size = 5) +
+        geom_text_repel(data = subset(temp_expV2, logFC_20min < -0.8 & -log10(FDR_20min) > 5), color = "#003560") +
+        geom_point(data = subset(temp_expV2, -log10(FDR_20min) > 5.5 & logFC_20min > 1), color = "#611300",size = 3) +
+        geom_point(data = subset(temp_expV2, -log10(FDR_20min) > 5 & logFC_20min < -0.8), color = "#003560") +
+        theme_bw() + 
+        labs_pubr() +
+        xlab("logFC")  + ylab("-log10(FDR)") + 
+        theme(legend.position = c(0.8,0.2), legend.text = element_text(size = 14), legend.title = element_text(size = 16)) +
+        xlim(c(0,3.2))
+```
+
+
+```{r}
+#Make columns for merged logFC and p-val for the 90min time point
+phos2 <- data2 %>% dplyr::select(Accession,GeneName,GeneMod, MasterMod, logFC_90min, logFC, FDR_90min, FDR, CDK1.x, CDK1.y) %>% distinct()
+
+#Merging the CDK1 prediction from both datasets 
+phos2$CDK1 <- phos2$CDK1.x
+#Get TRUE FALSE for the missing prediction from the time course 
+notInV <- is.na(phos2$CDK1)
+phos2$CDK1[notInV] <- phos2$CDK1.y[notInV]
+
+#Combine FDR and logFC for the 90min time point
+phos2$inBoth <- "single_timepoint" # detected in single-timepoint
+phos2$inBoth[!(is.na(phos2$logFC_90)) & !(is.na(phos2$logFC))] <- "Both" # in both
+phos2$inBoth[!(is.na(phos2$logFC_90)) & is.na(phos2$logFC)] <- "time-course" # in time-course 
+
+
+A <- phos2 %>% filter(inBoth == "Both") %>% 
+                mutate(logFC_avg = (logFC+logFC_90min)/2,
+                        FDR_avg = (FDR + FDR_90min)/2)
+B <- phos2 %>% filter(inBoth == "single_timepoint") %>% 
+                mutate(logFC_avg = logFC,
+                        FDR_avg = FDR)
+
+C <- phos2 %>% filter(inBoth == "time-course") %>% 
+                mutate(logFC_avg = logFC_90min,
+                        FDR_avg = FDR_90min)
+mygenes <- bind_rows(list(A,B,C))
+mygenes$location <- as.numeric(gsub("S|T|Y", "", mygenes$MasterMod))
+
+ofInterest <- c("RIF1", "MDC1", "TP53BP1", "MCM4", "ORC1")
+
+mygenes <- mygenes %>% filter(GeneName %in% ofInterest)
+mygenes$sig <- "-"
+mygenes$sig[mygenes$logFC_avg < 0 & mygenes$FDR_avg < 0.01] <- "Downregulated"
+mygenes$sig[mygenes$logFC_avg > 0 & mygenes$FDR_avg < 0.01] <- "Upregulated"
+
+#Assign the clusters and kinase probability to sites 
+forClusters <- readRDS("data/tt_kinaseRank_updated_clust.rds") %>% dplyr::select(GeneMod, AssignedCluster)
+
+mygenes <- left_join(mygenes, forClusters, by = "GeneMod") %>% distinct() %>% 
+                        mutate(empKin = ifelse(CDK1 > 0.543,  "CDK (Theoretical)", "-"))
+
+mygenes$empKin[mygenes$CDK1 > 0.543 & mygenes$AssignedCluster %in% c(3,8)] <- "CDK (Empirical)"
+```
+
+# MDC1, 53BP1 and RIF1 plots
+
+## Phosphorylation distribution plots
+```{r}
+ggplot(subset(mygenes, GeneName == "RIF1") %>% arrange(CDK1), aes(location, logFC_avg, label = MasterMod, color = sig)) +
+    geom_linerange(aes(x = location, ymin = 0, ymax = logFC_avg, color = sig), size = 3) +
+    geom_point(aes(color = sig), size = 5) +
+    theme_prism()+ xlab("Amino acid") +
+    #geom_text_repel(data = subset(mygenes, GeneName == "RIF1" & sig == "-"),aes(color = sig),stat = "identity", nudge_y = 0.25) +
+    geom_label_repel(data = subset(mygenes, GeneName == "RIF1" & sig != "-"), aes(color = sig),stat = "identity", nudge_y = 0.25) +
+    annotate("rect", xmin= 1000, xmax= 2472, ymin= 0.02 , ymax= -0.02, fill="grey ") + 
+    theme(legend.position = "none") +
+    #scale_color_distiller(palette = "YlGnBu", direction=-1) +
+    scale_color_manual(values = c("grey", hcl.colors(10, "viridis")[c(2,4)])) +
+    scale_y_continuous(guide = "prism_offset_minor") +
+    ylab("logFC") 
+```
+
+```{r }
+ggplot(subset(mygenes, GeneName == "TP53BP1"), aes(location, logFC_avg, label = MasterMod, color = sig)) +
+    geom_linerange(aes(x = location, ymin = 0, ymax = logFC_avg, color = sig), size = 3) +
+    geom_point(aes(color = sig), size = 5) +
+    theme_prism() + xlab("Amino acid") +
+    #geom_text_repel(data = subset(mygenes, GeneName == "TP53BP1" & sig == "-"),aes(color = CDK1),stat = "identity", nudge_y = 0.25) +
+    geom_label_repel(data = subset(mygenes, GeneName == "TP53BP1" & sig != "-"), aes(color = sig),stat = "identity") +
+    annotate("rect", xmin= 0, xmax= 1972, ymin= 0.02 , ymax= -0.02, fill="grey ") + 
+    ggtitle("53BP1") +theme(legend.position = "None") +
+    #scale_color_distiller(palette = "Oranges", direction=1) +
+    scale_color_manual(values = c("grey",hcl.colors(10, "viridis")[c(2,4)])) +
+    ylab("logFC") +
+    scale_y_continuous(guide = "prism_offset_minor")
+
+```
+
+```{r }
+ggplot(subset(mygenes, GeneName == "MDC1"), aes(location, logFC_avg, label = MasterMod, color = sig)) +
+    geom_linerange(aes(x = location, ymin = 0, ymax = logFC_avg, color = sig), size = 3) +
+    geom_point(aes(color = sig), size = 5) +
+    theme_prism() + xlab("Amino acid") +
+    geom_text_repel(data = subset(mygenes, GeneName == "MDC1" & sig == "-"),aes(color = sig),stat = "identity", nudge_y = 0.25) +
+    geom_label_repel(data = subset(mygenes, GeneName == "MDC1" & sig != "-"), aes(color = sig),stat = "identity") +
+    annotate("rect", xmin= 0, xmax= 2089, ymin= 0.02 , ymax= -0.02, fill="grey ") + 
+    ggtitle("MDC1") +theme(legend.position = "None") +
+    scale_color_manual(values = c("grey",hcl.colors(10, "viridis")[c(2,4)])) +
+    ylab("logFC") +
+    scale_y_continuous(guide= "prism_offset_minor")
+
+```
+
+
+```{r }
+ggplot(subset(mygenes, GeneName == "MCM4"), aes(location, logFC_avg, label = MasterMod, color = sig)) +
+    geom_linerange(aes(x = location, ymin = 0, ymax = logFC_avg, color = sig), size = 3) +
+    geom_point(aes(color = sig), size = 5) +
+    theme_prism() + xlab("Amino acid") +
+    #geom_text_repel(data = subset(mygenes, GeneName == "MCM4" & sig == "-"),aes(color = sig),stat = "identity", nudge_y = 0.25) +
+    geom_label_repel(data = subset(mygenes, GeneName == "MCM4" & sig != "-"), aes(color = sig),stat = "identity") +
+    annotate("rect", xmin= 0, xmax= 400, ymin= 0.02 , ymax= -0.02, fill="grey ") + 
+    ggtitle("MCM4") +theme(legend.position = "None") +
+    scale_color_manual(values = c("grey",hcl.colors(10, "viridis")[c(3,8)])) +
+    ylab("logFC") +
+    scale_y_continuous(guide= "prism_offset_minor")
+
+```
+
+```{r }
+ggplot(subset(mygenes, GeneName == "ORC1"), aes(location, logFC_avg, label = MasterMod, color = sig)) +
+    geom_linerange(aes(x = location, ymin = 0, ymax = logFC_avg, color = sig), size = 3) +
+    geom_point(aes(color = sig), size = 5) +
+    theme_prism() + xlab("Amino acid") +
+    #geom_text_repel(data = subset(mygenes, GeneName == "ORC1" & sig == "-"),aes(color = sig),stat = "identity", nudge_y = 0.25) +
+    geom_label_repel(data = subset(mygenes, GeneName == "ORC1" & sig != "-"), aes(color = sig),stat = "identity") +
+    annotate("rect", xmin= 0, xmax= 400, ymin= 0.02 , ymax= -0.02, fill="grey ") + 
+    ggtitle("ORC1") +theme(legend.position = "None") +
+    scale_color_manual(values = c("grey",hcl.colors(10, "viridis")[c(3,8)])) +
+    ylab("logFC") +
+    scale_y_continuous(guide= "prism_offset_minor")
+
+```
